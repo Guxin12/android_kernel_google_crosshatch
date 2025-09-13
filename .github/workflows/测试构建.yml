@@ -4,13 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "选择要编译的分支"
+        description: "输入要编译的分支名称"
         required: true
         default: "ACF2"
       target:
-        description: "编译目标 (Image/modules/all)"
+        description: "选择编译目标"
         required: true
         default: "all"
+        type: choice
+        options:
+          - Image
+          - modules
+          - all
       tag_name:
         description: "Release 标签 (例如 v1.0)"
         required: true
