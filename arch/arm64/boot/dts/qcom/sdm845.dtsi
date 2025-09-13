@@ -636,7 +636,7 @@
 			alloc-ranges = <0 0x00000000 0 0xffffffff>;
 			reusable;
 			alignment = <0 0x400000>;
-			size = <0 0x2000000>;
+			size = <0 0x8000000>;
 			linux,cma-default;
 		};
 	};
@@ -1853,6 +1853,7 @@
 			qcom,secure-context-bank;
 			iommus = <&apps_smmu 0x140A 0x30>;
 			dma-coherent;
+			status = "disabled";
 		};
 		qcom,msm_fastrpc_compute_cb11 {
 			compatible = "qcom,msm-fastrpc-compute-cb";

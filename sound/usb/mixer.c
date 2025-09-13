@@ -2106,7 +2106,8 @@ static int parse_audio_mixer_unit(struct mixer_build *state, int unitid,
 	} else {
 		input_pins = desc->bNrInPins;
 		num_outs = uac_mixer_unit_bNrChannels(desc);
-		if (desc->bLength < 11 || !input_pins || !num_outs) {
+		if (desc->bLength < 11 || !input_pins || !num_outs ||
+	    desc->bLength < sizeof(*desc) + desc->bNrInPins) {
 			usb_audio_err(state->chip,
 				      "invalid MIXER UNIT descriptor %d\n",
 				      unitid);

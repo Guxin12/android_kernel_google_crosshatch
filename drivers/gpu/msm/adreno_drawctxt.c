@@ -52,8 +52,6 @@ void adreno_drawctxt_dump(struct kgsl_device *device,
 {
 	unsigned int queue, start, retire;
 	struct adreno_context *drawctxt = ADRENO_CONTEXT(context);
-	int index, pos;
-	char buf[120];
 
 	kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_QUEUED, &queue);
 	kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_CONSUMED, &start);
@@ -114,25 +112,6 @@ void adreno_drawctxt_dump(struct kgsl_device *device,
 	}
 
 stats:
-	memset(buf, 0, sizeof(buf));
-
-	pos = 0;
-
-	for (index = 0; index < SUBMIT_RETIRE_TICKS_SIZE; index++) {
-		uint64_t msecs;
-		unsigned int usecs;
-
-		if (!drawctxt->submit_retire_ticks[index])
-			continue;
-		msecs = drawctxt->submit_retire_ticks[index] * 10;
-		usecs = do_div(msecs, 192);
-		usecs = do_div(msecs, 1000);
-		pos += snprintf(buf + pos, sizeof(buf) - pos, "%d.%0d ",
-			(unsigned int)msecs, usecs);
-	}
-	dev_err(device->dev, "  context[%d]: submit times: %s\n",
-		context->id, buf);
-
 	spin_unlock_bh(&drawctxt->lock);
 }
 
@@ -472,6 +451,7 @@ void adreno_drawctxt_detach(struct kgsl_context *context)
 {
 	struct kgsl_device *device;
 	struct adreno_device *adreno_dev;
+	struct adreno_gpudev *gpudev;
 	struct adreno_context *drawctxt;
 	struct adreno_ringbuffer *rb;
 	int ret, count, i;
@@ -482,6 +462,7 @@ void adreno_drawctxt_detach(struct kgsl_context *context)
 
 	device = context->device;
 	adreno_dev = ADRENO_DEVICE(device);
+	gpudev = ADRENO_GPU_DEVICE(adreno_dev);
 	drawctxt = ADRENO_CONTEXT(context);
 	rb = drawctxt->rb;
 
@@ -563,6 +544,9 @@ void adreno_drawctxt_detach(struct kgsl_context *context)
 
 	mutex_unlock(&device->mutex);
 
+	if (gpudev->preemption_context_destroy)
+		gpudev->preemption_context_destroy(context);
+
 	/* wake threads waiting to submit commands from this context */
 	wake_up_all(&drawctxt->waiting);
 	wake_up_all(&drawctxt->wq);
@@ -571,17 +555,9 @@ void adreno_drawctxt_detach(struct kgsl_context *context)
 void adreno_drawctxt_destroy(struct kgsl_context *context)
 {
 	struct adreno_context *drawctxt;
-	struct adreno_device *adreno_dev;
-	struct adreno_gpudev *gpudev;
 
 	if (context == NULL)
 		return;
-
-	adreno_dev = ADRENO_DEVICE(context->device);
-	gpudev = ADRENO_GPU_DEVICE(adreno_dev);
-
-	if (gpudev->preemption_context_destroy)
-		gpudev->preemption_context_destroy(context);
 
 	drawctxt = ADRENO_CONTEXT(context);
 	kfree(drawctxt);

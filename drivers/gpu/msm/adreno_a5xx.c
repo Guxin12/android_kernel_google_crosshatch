@@ -2248,7 +2248,7 @@ static int a5xx_microcode_load(struct adreno_device *adreno_dev)
 		desc.args[1] = 13;
 		desc.arginfo = SCM_ARGS(2);
 
-		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_BOOT, 0xA), &desc);
+		ret = scm_call2_atomic(SCM_SIP_FNID(SCM_SVC_BOOT, 0xA), &desc);
 		if (ret) {
 			pr_err("SCM resume call failed with error %d\n", ret);
 			return ret;
@@ -2284,6 +2284,7 @@ static int _me_init_ucode_workarounds(struct adreno_device *adreno_dev)
 	switch (ADRENO_GPUREV(adreno_dev)) {
 	case ADRENO_REV_A510:
 		return 0x00000001; /* Ucode workaround for token end syncs */
+	case ADRENO_REV_A504:
 	case ADRENO_REV_A505:
 	case ADRENO_REV_A506:
 	case ADRENO_REV_A530:

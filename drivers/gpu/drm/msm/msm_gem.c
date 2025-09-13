@@ -44,7 +44,6 @@ static bool use_pages(struct drm_gem_object *obj)
 	struct msm_gem_object *msm_obj = to_msm_bo(obj);
 	return !msm_obj->vram_node;
 }
-
 /*
  * Cache sync.. this is a bit over-complicated, to fit dma-mapping
  * API.  Really GPU cache is out of scope here (handled on cmdstream)
@@ -58,11 +57,9 @@ static bool use_pages(struct drm_gem_object *obj)
  *
  * Let this be a cautionary tail of abstraction gone wrong.
  */
-
 static void sync_for_device(struct msm_gem_object *msm_obj)
 {
 	struct device *dev = msm_obj->base.dev->dev;
-
 	if (get_dma_ops(dev) && IS_ENABLED(CONFIG_ARM64)) {
 		dma_sync_sg_for_device(dev, msm_obj->sgt->sgl,
 			msm_obj->sgt->nents, DMA_BIDIRECTIONAL);
@@ -71,11 +68,9 @@ static void sync_for_device(struct msm_gem_object *msm_obj)
 			msm_obj->sgt->nents, DMA_BIDIRECTIONAL);
 	}
 }
-
 static void sync_for_cpu(struct msm_gem_object *msm_obj)
 {
 	struct device *dev = msm_obj->base.dev->dev;
-
 	if (get_dma_ops(dev) && IS_ENABLED(CONFIG_ARM64)) {
 		dma_sync_sg_for_cpu(dev, msm_obj->sgt->sgl,
 			msm_obj->sgt->nents, DMA_BIDIRECTIONAL);
@@ -84,7 +79,6 @@ static void sync_for_cpu(struct msm_gem_object *msm_obj)
 			msm_obj->sgt->nents, DMA_BIDIRECTIONAL);
 	}
 }
-
 /* allocate pages from VRAM carveout, used when no IOMMU: */
 static struct page **get_pages_vram(struct drm_gem_object *obj,
 		int npages)
@@ -1035,7 +1029,7 @@ struct drm_gem_object *msm_gem_new(struct drm_device *dev,
 
 	ret = msm_gem_new_impl(dev, size, flags, NULL, &obj);
 	if (ret)
-		goto fail;
+		return ERR_PTR(ret);
 
 	if (use_pages(obj)) {
 		ret = drm_gem_object_init(dev, obj, size);
@@ -1075,7 +1069,7 @@ struct drm_gem_object *msm_gem_import(struct drm_device *dev,
 	ret = msm_gem_new_impl(dev, size, MSM_BO_WC, dmabuf->resv, &obj);
 	mutex_unlock(&dev->struct_mutex);
 	if (ret)
-		goto fail;
+		return ERR_PTR(ret);
 
 	drm_gem_private_object_init(dev, obj, size);
 

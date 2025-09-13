@@ -99,7 +99,6 @@ Optional Properties:
 - qcom,chipid:		   If it exists this property is used to replace
 			   the chip identification read from the GPU hardware.
 			   This is used to override faulty hardware readings.
-- qcom,disable-wake-on-touch:   Boolean. Disables the GPU power up on a touch input event.
 - qcom,disable-busy-time-burst:
 				Boolean. Disables the busy time burst to avoid switching
 				of power level for large frames based on the busy time limit.
@@ -204,6 +203,10 @@ Optional Properties:
 
 - qcom,tsens-name:
 				Specify the name of GPU temperature sensor. This name will be used
+				to get the temperature from the thermal driver API.
+
+- tzone-names:
+				Specify the names of GPU thermal zones. These will be used
 				to get the temperature from the thermal driver API.
 
 - qcom,enable-midframe-timer:

@@ -567,6 +567,7 @@ int f2fs_submit_page_bio(struct f2fs_io_info *fio)
 	if (fio->io_wbc && !is_read_io(fio->op))
 		wbc_account_io(fio->io_wbc, page, PAGE_SIZE);
 
+	fio->op_flags |= fio->encrypted_page ? REQ_NOENCRYPT : 0;
 	bio_set_op_attrs(bio, fio->op, fio->op_flags);
 
 	inc_page_count(fio->sbi, is_read_io(fio->op) ?
@@ -671,6 +672,7 @@ next:
 	verify_fio_blkaddr(fio);
 
 	bio_page = fio->encrypted_page ? fio->encrypted_page : fio->page;
+	fio->op_flags |= fio->encrypted_page ? REQ_NOENCRYPT : 0;
 
 	/* set submitted = true as a return value */
 	fio->submitted = true;
@@ -744,7 +746,10 @@ static struct bio *f2fs_grab_read_bio(struct inode *inode, block_t blkaddr,
 
 	f2fs_target_device(sbi, blkaddr, bio);
 	bio->bi_end_io = f2fs_read_end_io;
-	bio_set_op_attrs(bio, REQ_OP_READ, op_flag);
+	bio_set_op_attrs(bio, REQ_OP_READ,
+			 (IS_ENCRYPTED(inode) ?
+			  REQ_NOENCRYPT :
+			  op_flag));
 
 	if (f2fs_encrypted_file(inode) &&
 	    !fscrypt_using_hardware_encryption(inode))
@@ -2429,8 +2434,11 @@ continue_unlock:
 					ret = 0;
 					if (wbc->sync_mode == WB_SYNC_ALL) {
 						cond_resched();
-						congestion_wait(BLK_RW_ASYNC,
-									HZ/50);
+#if (CONFIG_HZ > 100)
+						congestion_wait(BLK_RW_ASYNC, 2);
+#else
+						congestion_wait(BLK_RW_ASYNC, 1);
+#endif
 						goto retry_write;
 					}
 					continue;

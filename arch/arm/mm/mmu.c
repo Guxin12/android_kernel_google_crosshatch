@@ -228,12 +228,14 @@ early_param("ecc", early_ecc);
 static int __init early_cachepolicy(char *p)
 {
 	pr_warn("cachepolicy kernel parameter not supported without cp15\n");
+	return 0;
 }
 early_param("cachepolicy", early_cachepolicy);
 
 static int __init noalign_setup(char *__unused)
 {
 	pr_warn("noalign kernel parameter not supported without cp15\n");
+	return 1;
 }
 __setup("noalign", noalign_setup);
 
@@ -1183,19 +1185,6 @@ void __init adjust_lowmem_bounds(void)
 			break;
 		}
 	}
-
-#ifdef CONFIG_ENABLE_VMALLOC_SAVING
-	struct memblock_region *prev_reg = NULL;
-
-	for_each_memblock(memory, reg) {
-		if (prev_reg == NULL) {
-			prev_reg = reg;
-			continue;
-		}
-		vmalloc_limit += reg->base - (prev_reg->base + prev_reg->size);
-		prev_reg = reg;
-	}
-#endif
 
 	for_each_memblock(memory, reg) {
 		phys_addr_t block_start = reg->base;

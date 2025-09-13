@@ -28,8 +28,8 @@
 #define __futex_atomic_op(insn, ret, oldval, uaddr, tmp, oparg)		\
 do {									\
 	unsigned int loops = FUTEX_MAX_LOOPS;				\
-	uaccess_enable();						\
 									\
+	uaccess_enable();						\
 	asm volatile(							\
 "	prfm	pstl1strm, %2\n"					\
 "1:	ldxr	%w1, %2\n"						\

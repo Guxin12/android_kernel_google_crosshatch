@@ -113,7 +113,8 @@ struct iv_tcw_private {
  * and encrypts / decrypts at the same time.
  */
 enum flags { DM_CRYPT_SUSPENDED, DM_CRYPT_KEY_VALID,
-	     DM_CRYPT_SAME_CPU, DM_CRYPT_NO_OFFLOAD };
+	     DM_CRYPT_SAME_CPU, DM_CRYPT_NO_OFFLOAD,
+	     DM_CRYPT_ENCRYPT_OVERRIDE };
 
 enum cipher_flags {
 	CRYPT_IV_LARGE_SECTORS,		/* Calculate IV from sector_size, not 512B sectors */
@@ -1891,6 +1892,10 @@ static int crypt_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 			else if (!strcasecmp(opt_string, "submit_from_crypt_cpus"))
 				set_bit(DM_CRYPT_NO_OFFLOAD, &cc->flags);
 
+			else if (!strcasecmp(opt_string, "allow_encrypt_override"))
+				set_bit(DM_CRYPT_ENCRYPT_OVERRIDE, &cc->flags);
+
+
 			else if (sscanf(opt_string, "sector_size:%hu%c",
 					&cc->sector_size, &dummy) == 1) {
 				if (cc->sector_size < (1 << SECTOR_SHIFT) ||
@@ -1914,24 +1919,17 @@ static int crypt_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
 	ret = -ENOMEM;
-	cc->io_queue = alloc_workqueue("kcryptd_io",
-				       WQ_HIGHPRI |
-				       WQ_MEM_RECLAIM,
-				       1);
+	cc->io_queue = alloc_workqueue("kcryptd_io", WQ_HIGHPRI | WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM, 1);
 	if (!cc->io_queue) {
 		ti->error = "Couldn't create kcryptd io queue";
 		goto bad;
 	}
 
 	if (test_bit(DM_CRYPT_SAME_CPU, &cc->flags))
-		cc->crypt_queue = alloc_workqueue("kcryptd",
-						  WQ_HIGHPRI |
-						  WQ_MEM_RECLAIM, 1);
+		cc->crypt_queue = alloc_workqueue("kcryptd", WQ_HIGHPRI | WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM, 1);
 	else
 		cc->crypt_queue = alloc_workqueue("kcryptd",
-						  WQ_HIGHPRI |
-						  WQ_MEM_RECLAIM |
-						  WQ_UNBOUND,
+						  WQ_HIGHPRI | WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_UNBOUND,
 						  num_online_cpus());
 	if (!cc->crypt_queue) {
 		ti->error = "Couldn't create kcryptd queue";
@@ -1966,12 +1964,15 @@ static int crypt_map(struct dm_target *ti, struct bio *bio)
 	struct crypt_config *cc = ti->private;
 
 	/*
-	 * If bio is REQ_PREFLUSH or REQ_OP_DISCARD, just bypass crypt queues.
+	 * If bio is REQ_PREFLUSH, REQ_NOENCRYPT, or REQ_OP_DISCARD,
+	 * just bypass crypt queues.
 	 * - for REQ_PREFLUSH device-mapper core ensures that no IO is in-flight
 	 * - for REQ_OP_DISCARD caller must use flush if IO ordering matters
 	 */
-	if (unlikely(bio->bi_opf & REQ_PREFLUSH ||
-	    bio_op(bio) == REQ_OP_DISCARD)) {
+	if (unlikely(bio->bi_opf & REQ_PREFLUSH) ||
+	    (unlikely(bio->bi_opf & REQ_NOENCRYPT) &&
+	     test_bit(DM_CRYPT_ENCRYPT_OVERRIDE, &cc->flags)) ||
+	    bio_op(bio) == REQ_OP_DISCARD) {
 		bio->bi_bdev = cc->dev->bdev;
 		if (bio_sectors(bio))
 			bio->bi_iter.bi_sector = cc->start +
@@ -2009,6 +2010,11 @@ static int crypt_map(struct dm_target *ti, struct bio *bio)
 	return DM_MAPIO_SUBMITTED;
 }
 
+static char hex2asc(unsigned char c)
+{
+	return c + '0' + ((unsigned)(9 - c) >> 4 & 0x27);
+}
+
 static void crypt_status(struct dm_target *ti, status_type_t type,
 			 unsigned status_flags, char *result, unsigned maxlen)
 {
@@ -2024,10 +2030,12 @@ static void crypt_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s ", cc->cipher_string);
 
-		if (cc->key_size > 0)
-			for (i = 0; i < cc->key_size; i++)
-				DMEMIT("%02x", cc->key[i]);
-		else
+		if (cc->key_size > 0) {
+			for (i = 0; i < cc->key_size; i++) {
+				DMEMIT("%c%c", hex2asc(cc->key[i] >> 4),
+				       hex2asc(cc->key[i] & 0xf));
+			}
+		} else
 			DMEMIT("-");
 
 		DMEMIT(" %llu %s %llu", (unsigned long long)cc->iv_offset,
@@ -2036,6 +2044,7 @@ static void crypt_status(struct dm_target *ti, status_type_t type,
 		num_feature_args += !!ti->num_discard_bios;
 		num_feature_args += test_bit(DM_CRYPT_SAME_CPU, &cc->flags);
 		num_feature_args += test_bit(DM_CRYPT_NO_OFFLOAD, &cc->flags);
+		num_feature_args += test_bit(DM_CRYPT_ENCRYPT_OVERRIDE, &cc->flags);
 		num_feature_args += cc->sector_size != (1 << SECTOR_SHIFT);
 		num_feature_args += test_bit(CRYPT_IV_LARGE_SECTORS, &cc->cipher_flags);
 		if (num_feature_args) {
@@ -2046,6 +2055,8 @@ static void crypt_status(struct dm_target *ti, status_type_t type,
 				DMEMIT(" same_cpu_crypt");
 			if (test_bit(DM_CRYPT_NO_OFFLOAD, &cc->flags))
 				DMEMIT(" submit_from_crypt_cpus");
+			if (test_bit(DM_CRYPT_ENCRYPT_OVERRIDE, &cc->flags))
+				DMEMIT(" allow_encrypt_override");
 			if (cc->sector_size != (1 << SECTOR_SHIFT))
 				DMEMIT(" sector_size:%d", cc->sector_size);
 			if (test_bit(CRYPT_IV_LARGE_SECTORS, &cc->cipher_flags))

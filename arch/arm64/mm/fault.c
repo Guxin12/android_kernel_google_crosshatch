@@ -298,14 +298,12 @@ static void do_bad_area(unsigned long addr, unsigned int esr, struct pt_regs *re
 #define VM_FAULT_BADMAP		0x010000
 #define VM_FAULT_BADACCESS	0x020000
 
-static int __do_page_fault(struct mm_struct *mm, unsigned long addr,
+static int __do_page_fault(struct vm_area_struct *vma, unsigned long addr,
 			   unsigned int mm_flags, unsigned long vm_flags,
 			   struct task_struct *tsk)
 {
-	struct vm_area_struct *vma;
 	int fault;
 
-	vma = find_vma(mm, addr);
 	fault = VM_FAULT_BADMAP;
 	if (unlikely(!vma))
 		goto out;
@@ -349,6 +347,7 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	bool was_major = false;
 	unsigned long vm_flags = VM_READ | VM_WRITE | VM_EXEC;
 	unsigned int mm_flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+	struct vm_area_struct *vma = NULL;
 	unsigned long event_ts = jiffies;
 
 	if (notify_page_fault(regs, esr))
@@ -388,6 +387,14 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	}
 
 	/*
+	 * let's try a speculative page fault without grabbing the
+	 * mmap_sem.
+	 */
+	fault = handle_speculative_fault(mm, addr, mm_flags, &vma);
+	if (fault != VM_FAULT_RETRY)
+		goto done;
+
+	/*
 	 * As per x86, we may deadlock here. However, since the kernel only
 	 * validly references user space from well defined areas of the code,
 	 * we can bug out early if this is from code which shouldn't.
@@ -409,18 +416,43 @@ retry:
 #endif
 	}
 
-	fault = __do_page_fault(mm, addr, mm_flags, vm_flags, tsk);
+	if (!vma || !can_reuse_spf_vma(vma, addr))
+		vma = find_vma(mm, addr);
 
-	/*
-	 * If we need to retry but a fatal signal is pending, handle the
-	 * signal first. We do not need to release the mmap_sem because it
-	 * would already be released in __lock_page_or_retry in mm/filemap.c.
-	 */
-	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current)) {
-		if (!user_mode(regs))
-			goto no_context;
-		return 0;
+	fault = __do_page_fault(vma, addr, mm_flags, vm_flags, tsk);
+	if (fault & VM_FAULT_RETRY) {
+		/*
+		 * If we need to retry but a fatal signal is pending, handle the
+		 * signal first. We do not need to release the mmap_sem because
+		 * it would already be released in __lock_page_or_retry in
+		 * mm/filemap.c.
+		 */
+
+		if (fatal_signal_pending(current)) {
+			if (!user_mode(regs))
+				goto no_context;
+			return 0;
+		}
+
+		/*
+		 * Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk of
+		 * starvation.
+		 */
+		if (mm_flags & FAULT_FLAG_ALLOW_RETRY) {
+			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			mm_flags |= FAULT_FLAG_TRIED;
+
+			/*
+			 * Do not try to reuse this vma and fetch it
+			 * again since we will release the mmap_sem.
+			 */
+			vma = NULL;
+			goto retry;
+		}
 	}
+
+	up_read(&mm->mmap_sem);
+done:
 
 	/*
 	 * Major/minor page fault accounting is only done on the initial
@@ -440,15 +472,6 @@ retry:
 			perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1, regs,
 				      addr);
 		}
-		if (fault & VM_FAULT_RETRY) {
-			/*
-			 * Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk of
-			 * starvation.
-			 */
-			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
-			mm_flags |= FAULT_FLAG_TRIED;
-			goto retry;
-		}
 	}
 
 	if (was_major) {
@@ -459,7 +482,6 @@ retry:
 	} else {
 		mm_event_record(MM_MIN_FAULT, event_ts);
 	}
-	up_read(&mm->mmap_sem);
 
 	/*
 	 * Handle the "normal" case first - VM_FAULT_MAJOR
@@ -782,7 +804,7 @@ asmlinkage int __exception do_debug_exception(unsigned long addr_if_watchpoint,
 NOKPROBE_SYMBOL(do_debug_exception);
 
 #ifdef CONFIG_ARM64_PAN
-int cpu_enable_pan(void *__unused)
+void cpu_enable_pan(const struct arm64_cpu_capabilities *__unused)
 {
 	/*
 	 * We modify PSTATE. This won't work from irq context as the PSTATE
@@ -792,20 +814,5 @@ int cpu_enable_pan(void *__unused)
 
 	config_sctlr_el1(SCTLR_EL1_SPAN, 0);
 	asm(SET_PSTATE_PAN(1));
-	return 0;
 }
 #endif /* CONFIG_ARM64_PAN */
-
-#ifdef CONFIG_ARM64_UAO
-/*
- * Kernel threads have fs=KERNEL_DS by default, and don't need to call
- * set_fs(), devtmpfs in particular relies on this behaviour.
- * We need to enable the feature at runtime (instead of adding it to
- * PSR_MODE_EL1h) as the feature may not be implemented by the cpu.
- */
-int cpu_enable_uao(void *__unused)
-{
-	asm(SET_PSTATE_UAO(1));
-	return 0;
-}
-#endif /* CONFIG_ARM64_UAO */

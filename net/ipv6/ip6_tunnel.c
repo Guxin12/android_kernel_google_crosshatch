@@ -1007,12 +1007,12 @@ int ip6_tnl_xmit_ctl(struct ip6_tnl *t,
 			ldev = dev_get_by_index_rcu(net, p->link);
 
 		if (unlikely(!ipv6_chk_addr(net, laddr, ldev, 0)))
-			pr_warn("%s xmit: Local address not yet configured!\n",
-				p->name);
+			pr_warn_ratelimited("%s xmit: Local address not yet configured!\n",
+					    p->name);
 		else if (!ipv6_addr_is_multicast(raddr) &&
 			 unlikely(ipv6_chk_addr(net, raddr, NULL, 0)))
-			pr_warn("%s xmit: Routing loop! Remote address found on this node!\n",
-				p->name);
+			pr_warn_ratelimited("%s xmit: Routing loop! Remote address found on this node!\n",
+					    p->name);
 		else
 			ret = 1;
 		rcu_read_unlock();
@@ -1282,8 +1282,9 @@ ip4ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev)
 			fl6.flowi6_mark = skb->mark;
 	}
 
-	fl6.flowi6_uid = sock_net_uid(dev_net(dev), NULL);
 	dsfield = INET_ECN_encapsulate(dsfield, ipv4_get_dsfield(iph));
+
+	fl6.flowi6_uid = sock_net_uid(dev_net(dev), NULL);
 
 	if (iptunnel_handle_offloads(skb, SKB_GSO_IPXIP6))
 		return -1;
@@ -1370,8 +1371,9 @@ ip6ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev)
 			fl6.flowi6_mark = skb->mark;
 	}
 
-	fl6.flowi6_uid = sock_net_uid(dev_net(dev), NULL);
 	dsfield = INET_ECN_encapsulate(dsfield, ipv6_get_dsfield(ipv6h));
+
+	fl6.flowi6_uid = sock_net_uid(dev_net(dev), NULL);
 
 	if (iptunnel_handle_offloads(skb, SKB_GSO_IPXIP6))
 		return -1;

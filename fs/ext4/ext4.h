@@ -202,7 +202,10 @@ typedef struct ext4_io_end {
 	ssize_t			size;		/* size of the extent */
 } ext4_io_end_t;
 
+#define EXT4_IO_ENCRYPTED	1
+
 struct ext4_io_submit {
+	unsigned int		io_flags;
 	struct writeback_control *io_wbc;
 	struct bio		*io_bio;
 	ext4_io_end_t		*io_end;
@@ -477,7 +480,7 @@ enum {
  *
  * It's not paranoia if the Murphy's Law really *is* out to get you.  :-)
  */
-#define TEST_FLAG_VALUE(FLAG) (EXT4_##FLAG##_FL == (1 << EXT4_INODE_##FLAG))
+#define TEST_FLAG_VALUE(FLAG) (EXT4_##FLAG##_FL == (1U << EXT4_INODE_##FLAG))
 #define CHECK_FLAG_VALUE(FLAG) BUILD_BUG_ON(!TEST_FLAG_VALUE(FLAG))
 
 static inline void ext4_check_flag_values(void)
@@ -3106,7 +3109,7 @@ static inline void ext4_set_de_type(struct super_block *sb,
 /* readpages.c */
 extern int ext4_mpage_readpages(struct address_space *mapping,
 				struct list_head *pages, struct page *page,
-				unsigned nr_pages);
+				unsigned nr_pages, bool is_readahead);
 
 /* symlink.c */
 extern const struct inode_operations ext4_encrypted_symlink_inode_operations;

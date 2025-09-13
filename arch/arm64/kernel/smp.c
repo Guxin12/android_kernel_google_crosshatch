@@ -272,7 +272,7 @@ asmlinkage notrace void secondary_start_kernel(void)
 	 * the CPU migration code to notice that the CPU is online
 	 * before we continue.
 	 */
-	pr_info("CPU%u: Booted secondary processor [%08x]\n",
+	pr_debug("CPU%u: Booted secondary processor [%08x]\n",
 					 cpu, read_cpuid_id());
 	update_cpu_boot_status(CPU_BOOT_SUCCESS);
 	set_cpu_online(cpu, true);
@@ -458,12 +458,6 @@ void __init smp_prepare_boot_cpu(void)
 	jump_label_init();
 	cpuinfo_store_boot_cpu();
 	save_boot_cpu_run_el();
-	/*
-	 * Run the errata work around checks on the boot CPU, once we have
-	 * initialised the cpu feature infrastructure from
-	 * cpuinfo_store_boot_cpu() above.
-	 */
-	update_cpu_errata_workarounds();
 }
 
 static u64 __init of_get_cpu_mpidr(struct device_node *dn)
@@ -824,12 +818,10 @@ void arch_send_call_function_single_ipi(int cpu)
 	smp_cross_call_common(cpumask_of(cpu), IPI_CALL_FUNC);
 }
 
-#ifdef CONFIG_ARM64_ACPI_PARKING_PROTOCOL
 void arch_send_wakeup_ipi_mask(const struct cpumask *mask)
 {
 	smp_cross_call_common(mask, IPI_WAKEUP);
 }
-#endif
 
 #ifdef CONFIG_IRQ_WORK
 void arch_irq_work_raise(void)
@@ -859,7 +851,7 @@ static void ipi_cpu_stop(unsigned int cpu, struct pt_regs *regs)
 		raw_spin_unlock(&stop_lock);
 	}
 
-	set_cpu_active(cpu, false);
+	set_cpu_online(cpu, false);
 
 	flush_cache_all();
 	local_irq_disable();
@@ -980,13 +972,8 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		break;
 #endif
 
-#ifdef CONFIG_ARM64_ACPI_PARKING_PROTOCOL
 	case IPI_WAKEUP:
-		WARN_ONCE(!acpi_parking_protocol_valid(cpu),
-			  "CPU%u: Wake-up IPI outside the ACPI parking protocol\n",
-			  cpu);
 		break;
-#endif
 
 	case IPI_CPU_BACKTRACE:
 		ipi_cpu_backtrace(cpu, regs);

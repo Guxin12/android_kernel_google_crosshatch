@@ -20,7 +20,6 @@
 #include <linux/sched.h>
 #include <linux/sched/loadavg.h>
 #include <linux/math64.h>
-#include <linux/module.h>
 
 /*
  * Please note when changing the tuning values:
@@ -183,7 +182,7 @@ static inline int performance_multiplier(unsigned long nr_iowaiters, unsigned lo
 	/* mult += 2 * get_loadavg(); */
 
 	/* for IO wait tasks (per cpu!) we add 5x each */
-	mult += 10 * nr_iowaiters;
+	mult += 2 * nr_iowaiters;
 
 	return mult;
 }
@@ -486,7 +485,6 @@ static struct cpuidle_governor menu_governor = {
 	.enable =	menu_enable_device,
 	.select =	menu_select,
 	.reflect =	menu_reflect,
-	.owner =	THIS_MODULE,
 };
 
 /**

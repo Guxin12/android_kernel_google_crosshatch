@@ -10,6 +10,15 @@
  * published by the Free Software Foundation.
  */
 
+#ifdef CONFIG_WAKE_GESTURES
+#include <linux/wake_gestures.h>
+static bool is_suspended;
+bool scr_suspended(void)
+{
+	return is_suspended;
+}
+#endif
+
 struct sec_ts_data *tsp_info;
 
 #include "sec_ts.h"
@@ -28,6 +37,7 @@ struct class *sec_class;
 #ifdef USE_POWER_RESET_WORK
 static void sec_ts_reset_work(struct work_struct *work);
 #endif
+static void sec_ts_read_info_work(struct work_struct *work);
 static void sec_ts_fw_update_work(struct work_struct *work);
 static void sec_ts_suspend_work(struct work_struct *work);
 static void sec_ts_resume_work(struct work_struct *work);
@@ -93,7 +103,7 @@ int sec_ts_i2c_write(struct sec_ts_data *ts, u8 reg, u8 *data, int len)
 		ret = -EIO;
 #ifdef USE_POR_AFTER_I2C_RETRY
 		if (ts->probe_done && !ts->reset_is_on_going)
-			schedule_delayed_work(&ts->reset_work, msecs_to_jiffies(TOUCH_RESET_DWORK_TIME));
+			queue_delayed_work(system_power_efficient_wq, &ts->reset_work, msecs_to_jiffies(TOUCH_RESET_DWORK_TIME));
 #endif
 	}
 
@@ -226,7 +236,7 @@ static int sec_ts_i2c_read_internal(struct sec_ts_data *ts, u8 reg,
 		ret = -EIO;
 #ifdef USE_POR_AFTER_I2C_RETRY
 		if (ts->probe_done && !ts->reset_is_on_going)
-			schedule_delayed_work(&ts->reset_work, msecs_to_jiffies(TOUCH_RESET_DWORK_TIME));
+			queue_delayed_work(system_power_efficient_wq, &ts->reset_work, msecs_to_jiffies(TOUCH_RESET_DWORK_TIME));
 #endif
 
 	}
@@ -433,7 +443,7 @@ static void dump_tsp_log(void)
 		pr_err("%s: %s %s: ignored ## tsp probe fail!!\n", SEC_TS_I2C_NAME, SECLOG, __func__);
 		return;
 	}
-	schedule_delayed_work(p_ghost_check, msecs_to_jiffies(100));
+	queue_delayed_work(system_power_efficient_wq, p_ghost_check, msecs_to_jiffies(100));
 }
 #endif
 
@@ -481,11 +491,6 @@ int sec_ts_wait_for_ready_with_count(struct sec_ts_data *ts, unsigned int ack,
 		}
 		sec_ts_delay(20);
 	}
-
-	input_info(true, &ts->client->dev,
-		"%s: %02X, %02X, %02X, %02X, %02X, %02X, %02X, %02X [%d]\n",
-		__func__, tBuff[0], tBuff[1], tBuff[2], tBuff[3],
-		tBuff[4], tBuff[5], tBuff[6], tBuff[7], retry);
 
 	return rc;
 }
@@ -957,6 +962,11 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 						input_report_key(ts->input_dev, BTN_TOUCH, 1);
 						input_report_key(ts->input_dev, BTN_TOOL_FINGER, 1);
 
+#ifdef CONFIG_WAKE_GESTURES
+						if (is_suspended)
+							ts->coord[t_id].x += 5000;
+#endif
+
 						input_report_abs(ts->input_dev, ABS_MT_POSITION_X, ts->coord[t_id].x);
 						input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, ts->coord[t_id].y);
 						input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, ts->coord[t_id].major);
@@ -1268,9 +1278,6 @@ void sec_ts_set_grip_type(struct sec_ts_data *ts, u8 set_type)
 {
 	u8 mode = G_NONE;
 
-	input_info(true, &ts->client->dev, "%s: re-init grip(%d), edh:%d, edg:%d, lan:%d\n", __func__,
-		set_type, ts->grip_edgehandler_direction, ts->grip_edge_range, ts->grip_landscape_mode);
-
 	/* edge handler */
 	if (ts->grip_edgehandler_direction != 0)
 		mode |= G_SET_EDGE_HANDLER;
@@ -1297,8 +1304,6 @@ void sec_ts_set_grip_type(struct sec_ts_data *ts, u8 set_type)
 static int sec_ts_pinctrl_configure(struct sec_ts_data *ts, bool enable)
 {
 	struct pinctrl_state *state;
-
-	input_info(true, &ts->client->dev, "%s: %s\n", __func__, enable ? "ACTIVE" : "SUSPEND");
 
 	if (enable) {
 		state = pinctrl_lookup_state(ts->plat_data->pinctrl, "on_state");
@@ -1997,6 +2002,7 @@ static int sec_ts_probe(struct i2c_client *client,
 #ifdef USE_POWER_RESET_WORK
 	INIT_DELAYED_WORK(&ts->reset_work, sec_ts_reset_work);
 #endif
+	INIT_DELAYED_WORK(&ts->work_read_info, sec_ts_read_info_work);
 	INIT_WORK(&ts->suspend_work, sec_ts_suspend_work);
 	INIT_WORK(&ts->resume_work, sec_ts_resume_work);
 	ts->event_wq = alloc_workqueue("sec_ts-event-queue", WQ_UNBOUND |
@@ -2012,21 +2018,10 @@ static int sec_ts_probe(struct i2c_client *client,
 	complete_all(&ts->bus_resumed);
 
 #ifdef SEC_TS_FW_UPDATE_ON_PROBE
-	INIT_WORK(&ts->fw_update_work, sec_ts_fw_update_work);
+	INIT_DELAYED_WORK(&ts->work_fw_update, sec_ts_fw_update_work);
 #else
 	input_info(true, &ts->client->dev, "%s: fw update on probe disabled!\n",
 		   __func__);
-	ts->fw_update_wq = alloc_workqueue("sec_ts-fw-update-queue",
-					    WQ_UNBOUND | WQ_HIGHPRI |
-					    WQ_CPU_INTENSIVE, 1);
-	if (!ts->fw_update_wq) {
-		input_err(true, &ts->client->dev,
-			  "%s: Can't alloc fw update work thread\n",
-			  __func__);
-		ret = -ENOMEM;
-		goto error_alloc_fw_update_wq;
-	}
-	INIT_DELAYED_WORK(&ts->fw_update_work, sec_ts_fw_update_work);
 #endif
 
 	ts->is_fw_corrupted = false;
@@ -2194,17 +2189,14 @@ static int sec_ts_probe(struct i2c_client *client,
 
 	device_init_wakeup(&client->dev, true);
 
-	if (ts->is_fw_corrupted == false)
+	if (ts->is_fw_corrupted == false) {
 		sec_ts_device_init(ts);
+		queue_delayed_work(system_power_efficient_wq, &ts->work_read_info,
+				      msecs_to_jiffies(5000));
+	}
 
 #ifdef SEC_TS_FW_UPDATE_ON_PROBE
-	schedule_work(&ts->fw_update_work);
-
-	/* Do not finish probe without checking and flashing the firmware */
-	flush_work(&ts->fw_update_work);
-#else
-	queue_delayed_work(ts->fw_update_wq, &ts->fw_update_work,
-		    msecs_to_jiffies(SEC_TS_FW_UPDATE_DELAY_MS_AFTER_PROBE));
+	schedule_delayed_work(&ts->work_fw_update, msecs_to_jiffies(10000));
 #endif
 
 #if defined(CONFIG_TOUCHSCREEN_DUMP_MODE)
@@ -2258,12 +2250,6 @@ err_allocate_input_dev:
 #ifdef CONFIG_TOUCHSCREEN_TBN
 	tbn_cleanup(ts->tbn);
 err_init_tbn:
-#endif
-
-#ifndef SEC_TS_FW_UPDATE_ON_PROBE
-	if (ts->fw_update_wq)
-		destroy_workqueue(ts->fw_update_wq);
-error_alloc_fw_update_wq:
 #endif
 
 	if (ts->event_wq)
@@ -2450,8 +2436,10 @@ static void sec_ts_reset_work(struct work_struct *work)
 }
 #endif
 
-void sec_ts_read_init_info(struct sec_ts_data *ts)
+static void sec_ts_read_info_work(struct work_struct *work)
 {
+	struct sec_ts_data *ts = container_of(work, struct sec_ts_data,
+							work_read_info.work);
 #ifndef CONFIG_SEC_FACTORY
 	struct sec_ts_test_mode mode;
 	char para = TO_TOUCH_MODE;
@@ -2463,22 +2451,14 @@ void sec_ts_read_init_info(struct sec_ts_data *ts)
 
 	ts->nv = get_tsp_nvm_data(ts, SEC_TS_NVM_OFFSET_FAC_RESULT);
 	ts->cal_count = get_tsp_nvm_data(ts, SEC_TS_NVM_OFFSET_CAL_COUNT);
-	ts->pressure_cal_base = get_tsp_nvm_data(ts,
-				SEC_TS_NVM_OFFSET_PRESSURE_BASE_CAL_COUNT);
-	ts->pressure_cal_delta = get_tsp_nvm_data(ts,
-				SEC_TS_NVM_OFFSET_PRESSURE_DELTA_CAL_COUNT);
+	ts->pressure_cal_base = get_tsp_nvm_data(ts, SEC_TS_NVM_OFFSET_PRESSURE_BASE_CAL_COUNT);
+	ts->pressure_cal_delta = get_tsp_nvm_data(ts, SEC_TS_NVM_OFFSET_PRESSURE_DELTA_CAL_COUNT);
 
-	input_info(true, &ts->client->dev,
-		    "%s: fac_nv:%02X, cal_count:%02X\n",
-		    __func__, ts->nv, ts->cal_count);
+	input_info(true, &ts->client->dev, "%s: fac_nv:%02X, cal_count:%02X\n", __func__, ts->nv, ts->cal_count);
 
 #ifdef PAT_CONTROL
-	ts->tune_fix_ver = (get_tsp_nvm_data(ts,
-				SEC_TS_NVM_OFFSET_TUNE_VERSION) << 8) |
-			    get_tsp_nvm_data(ts,
-				SEC_TS_NVM_OFFSET_TUNE_VERSION + 1);
-	input_info(true, &ts->client->dev,
-	    "%s: tune_fix_ver [%04X]\n", __func__, ts->tune_fix_ver);
+	ts->tune_fix_ver = (get_tsp_nvm_data(ts, SEC_TS_NVM_OFFSET_TUNE_VERSION) << 8) | get_tsp_nvm_data(ts, SEC_TS_NVM_OFFSET_TUNE_VERSION+1);
+	input_info(true, &ts->client->dev, "%s: tune_fix_ver [%04X]\n", __func__, ts->tune_fix_ver);
 #endif
 
 #ifdef USE_PRESSURE_SENSOR
@@ -2489,9 +2469,8 @@ void sec_ts_read_init_info(struct sec_ts_data *ts)
 	ts->pressure_left = ((data[16] << 8) | data[17]);
 	ts->pressure_center = ((data[8] << 8) | data[9]);
 	ts->pressure_right = ((data[0] << 8) | data[1]);
-	input_info(true, &ts->client->dev,
-		"%s: left: %d, center: %d, right: %d\n", __func__,
-		ts->pressure_left, ts->pressure_center, ts->pressure_right);
+	input_info(true, &ts->client->dev, "%s: left: %d, center: %d, right: %d\n",
+		__func__, ts->pressure_left, ts->pressure_center, ts->pressure_right);
 #endif
 
 #ifndef CONFIG_SEC_FACTORY
@@ -2506,8 +2485,7 @@ void sec_ts_read_init_info(struct sec_ts_data *ts)
 
 	ret = ts->sec_ts_i2c_write(ts, SEC_TS_CMD_SET_POWER_MODE, &para, 1);
 	if (ret < 0)
-		input_err(true, &ts->client->dev, "%s: Failed to set\n",
-				__func__);
+		 input_err(true, &ts->client->dev, "%s: Failed to set\n", __func__);
 
 	sec_ts_delay(350);
 
@@ -2524,16 +2502,8 @@ void sec_ts_read_init_info(struct sec_ts_data *ts)
 
 static void sec_ts_fw_update_work(struct work_struct *work)
 {
-#ifdef SEC_TS_FW_UPDATE_ON_PROBE
 	struct sec_ts_data *ts = container_of(work, struct sec_ts_data,
-					      fw_update_work);
-#else
-	struct delayed_work *fw_update_work = container_of(work,
-					struct delayed_work, work);
-	struct sec_ts_data *ts = container_of(fw_update_work,
-					struct sec_ts_data, fw_update_work);
-#endif
-
+					      work_fw_update.work);
 	int ret;
 
 	input_info(true, &ts->client->dev,
@@ -2552,14 +2522,13 @@ static void sec_ts_fw_update_work(struct work_struct *work)
 		if (ret == SEC_TS_ERR_NA) {
 			ts->is_fw_corrupted = false;
 			sec_ts_device_init(ts);
+			sec_ts_read_info_work(&ts->work_read_info.work);
 		} else
 			input_info(true, &ts->client->dev,
 				"%s: fail to sec_ts_fw_init 0x%x\n",
 				__func__, ret);
 	}
 
-	if (ts->is_fw_corrupted == false)
-		sec_ts_read_init_info(ts);
 	sec_ts_set_bus_ref(ts, SEC_TS_BUS_REF_FW_UPDATE, false);
 }
 
@@ -2640,7 +2609,7 @@ static int sec_ts_input_open(struct input_dev *dev)
 
 	if (ts->lowpower_status) {
 #ifdef USE_RESET_EXIT_LPM
-		schedule_delayed_work(&ts->reset_work, msecs_to_jiffies(TOUCH_RESET_DWORK_TIME));
+		queue_delayed_work(system_power_efficient_wq, &ts->reset_work, msecs_to_jiffies(TOUCH_RESET_DWORK_TIME));
 #else
 		sec_ts_set_lowpowermode(ts, TO_TOUCH_MODE);
 #endif
@@ -2706,11 +2675,12 @@ static int sec_ts_remove(struct i2c_client *client)
 	destroy_workqueue(ts->event_wq);
 
 #ifdef SEC_TS_FW_UPDATE_ON_PROBE
-	cancel_work_sync(&ts->fw_update_work);
-#else
-	cancel_delayed_work_sync(&ts->fw_update_work);
-	destroy_workqueue(ts->fw_update_wq);
+	cancel_delayed_work_sync(&ts->work_fw_update);
+	flush_delayed_work(&ts->work_fw_update);
 #endif
+
+	cancel_delayed_work_sync(&ts->work_read_info);
+	flush_delayed_work(&ts->work_read_info);
 
 	disable_irq_nosync(ts->client->irq);
 	free_irq(ts->client->irq, ts);
@@ -2949,10 +2919,6 @@ static void sec_set_switch_gpio(struct sec_ts_data *ts, int gpio_value)
 	if (!gpio_is_valid(gpio))
 		return;
 
-	input_info(true, &ts->client->dev, "%s: toggling i2c switch to %s\n",
-		   __func__, gpio_value == SEC_SWITCH_GPIO_VALUE_AP_MASTER ?
-		   "AP" : "SLPI");
-
 	retval = gpio_direction_output(gpio, gpio_value);
 	if (retval < 0)
 		input_err(true, &ts->client->dev,
@@ -2965,8 +2931,6 @@ static void sec_ts_suspend_work(struct work_struct *work)
 	struct sec_ts_data *ts = container_of(work, struct sec_ts_data,
 					      suspend_work);
 	int ret = 0;
-
-	input_info(true, &ts->client->dev, "%s\n", __func__);
 
 	mutex_lock(&ts->device_mutex);
 
@@ -3010,8 +2974,6 @@ static void sec_ts_resume_work(struct work_struct *work)
 	struct sec_ts_data *ts = container_of(work, struct sec_ts_data,
 					      resume_work);
 	int ret = 0;
-
-	input_info(true, &ts->client->dev, "%s\n", __func__);
 
 	mutex_lock(&ts->device_mutex);
 
@@ -3200,6 +3162,13 @@ static int sec_ts_screen_state_chg_callback(struct notifier_block *nb,
 	switch (blank) {
 	case MSM_DRM_BLANK_POWERDOWN:
 	case MSM_DRM_BLANK_LP:
+#ifdef CONFIG_WAKE_GESTURES
+		if (wg_switch) {
+			enable_irq_wake(ts->client->irq);
+			is_suspended = true;
+			break;
+		}
+#endif
 		if (val == MSM_DRM_EARLY_EVENT_BLANK) {
 			input_dbg(true, &ts->client->dev,
 				  "%s: MSM_DRM_BLANK_POWERDOWN.\n", __func__);
@@ -3207,6 +3176,17 @@ static int sec_ts_screen_state_chg_callback(struct notifier_block *nb,
 		}
 		break;
 	case MSM_DRM_BLANK_UNBLANK:
+#ifdef CONFIG_WAKE_GESTURES
+		if (wg_switch) {
+			disable_irq_wake(ts->client->irq);
+			is_suspended = false;
+			break;
+		}
+		if (wg_changed) {
+			wg_switch = wg_switch_temp;
+			wg_changed = false;
+		}
+#endif
 		if (val == MSM_DRM_EVENT_BLANK) {
 			input_dbg(true, &ts->client->dev,
 				  "%s: MSM_DRM_BLANK_UNBLANK.\n", __func__);

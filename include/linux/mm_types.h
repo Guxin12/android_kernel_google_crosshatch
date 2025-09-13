@@ -370,6 +370,10 @@ struct vm_area_struct {
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	seqcount_t vm_sequence;
+	atomic_t vm_ref_count;		/* see vma_get(), vma_put() */
+#endif
 };
 
 struct core_thread {
@@ -408,6 +412,9 @@ struct kioctx_table;
 struct mm_struct {
 	struct vm_area_struct *mmap;		/* list of VMAs */
 	struct rb_root mm_rb;
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	rwlock_t mm_rb_lock;
+#endif
 	u64 vmacache_seqnum;                   /* per-thread vmacache */
 #ifdef CONFIG_MMU
 	unsigned long (*get_unmapped_area) (struct file *filp,
@@ -421,9 +428,8 @@ struct mm_struct {
 	pgd_t * pgd;
 	atomic_t mm_users;			/* How many users with user space? */
 	atomic_t mm_count;			/* How many references to "struct mm_struct" (users count as 1) */
-	atomic_long_t nr_ptes;			/* PTE page table pages */
-#if CONFIG_PGTABLE_LEVELS > 2
-	atomic_long_t nr_pmds;			/* PMD page table pages */
+#ifdef CONFIG_MMU
+	atomic_long_t pgtables_bytes;		/* PTE page table pages */
 #endif
 	int map_count;				/* number of VMAs */
 
@@ -446,6 +452,8 @@ struct mm_struct {
 	unsigned long exec_vm;		/* VM_EXEC & ~VM_WRITE & ~VM_STACK */
 	unsigned long stack_vm;		/* VM_STACK */
 	unsigned long def_flags;
+
+	spinlock_t arg_lock; /* protect the below fields */
 	unsigned long start_code, end_code, start_data, end_data;
 	unsigned long start_brk, brk, start_stack;
 	unsigned long arg_start, arg_end, env_start, env_end;

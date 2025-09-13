@@ -990,6 +990,33 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 }
 
 #ifdef CONFIG_SMP
+
+static inline bool is_per_cpu_kthread(struct task_struct *p)
+{
+	if (!(p->flags & PF_KTHREAD))
+		return false;
+
+	if (p->nr_cpus_allowed != 1)
+		return false;
+
+	return true;
+}
+
+/*
+ * Per-CPU kthreads are allowed to run on !actie && online CPUs, see
+ * __set_cpus_allowed_ptr() and select_fallback_rq().
+ */
+static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
+{
+	if (!cpumask_test_cpu(cpu, tsk_cpus_allowed(p)))
+		return false;
+
+	if (is_per_cpu_kthread(p))
+		return cpu_online(cpu);
+
+	return cpu_active(cpu);
+}
+
 /*
  * This is how migration works:
  *
@@ -1046,16 +1073,8 @@ struct migration_arg {
  */
 static struct rq *__migrate_task(struct rq *rq, struct task_struct *p, int dest_cpu)
 {
-	if (p->flags & PF_KTHREAD) {
-		if (unlikely(!cpu_online(dest_cpu)))
-			return rq;
-	} else {
-		if (unlikely(!cpu_active(dest_cpu)))
-			return rq;
-	}
-
 	/* Affinity changed (again). */
-	if (!cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
+	if (!is_cpu_allowed(p, dest_cpu))
 		return rq;
 
 	rq = move_queued_task(rq, p, dest_cpu);
@@ -1589,9 +1608,7 @@ static int select_fallback_rq(int cpu, struct task_struct *p, bool allow_iso)
 	for (;;) {
 		/* Any allowed, online CPU? */
 		for_each_cpu(dest_cpu, tsk_cpus_allowed(p)) {
-			if (!(p->flags & PF_KTHREAD) && !cpu_active(dest_cpu))
-				continue;
-			if (!cpu_online(dest_cpu))
+			if (!is_cpu_allowed(p, dest_cpu))
 				continue;
 			if (cpu_isolated(dest_cpu)) {
 				if (allow_iso)
@@ -1639,7 +1656,7 @@ out:
 		 * leave kernel.
 		 */
 		if (p->mm && printk_ratelimit()) {
-			printk_deferred("process %d (%s) no longer affine to cpu%d\n",
+			pr_debug("process %d (%s) no longer affine to cpu%d\n",
 					task_pid_nr(p), p->comm, cpu);
 		}
 	}
@@ -1944,6 +1961,9 @@ out:
 
 bool cpus_share_cache(int this_cpu, int that_cpu)
 {
+	if (this_cpu == that_cpu)
+		return true;
+
 	return per_cpu(sd_llc_id, this_cpu) == per_cpu(sd_llc_id, that_cpu);
 }
 #endif /* CONFIG_SMP */
@@ -1954,8 +1974,10 @@ static void ttwu_queue(struct task_struct *p, int cpu, int wake_flags)
 	struct rq_flags rf;
 
 #if defined(CONFIG_SMP)
-	if (sched_feat(TTWU_QUEUE) && !cpus_share_cache(smp_processor_id(), cpu)) {
-		sched_clock_cpu(cpu); /* sync clocks x-cpu */
+	if (sched_feat(TTWU_QUEUE) &&
+			!idle_cpu(cpu) &&
+			!cpus_share_cache(smp_processor_id(), cpu)) {
+		sched_clock_cpu(cpu); /* Sync clocks across CPUs */
 		ttwu_queue_remote(p, cpu, wake_flags);
 		return;
 	}
@@ -2164,7 +2186,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	rq = cpu_rq(task_cpu(p));
 	raw_spin_lock(&rq->lock);
 	old_load = task_load(p);
-	wallclock = ktime_get_ns();
+	wallclock = sched_ktime_clock();
 	update_task_ravg(rq->curr, rq, TASK_UPDATE, wallclock, 0);
 	update_task_ravg(p, rq, TASK_WAKE, wallclock, 0);
 	raw_spin_unlock(&rq->lock);
@@ -2250,7 +2272,7 @@ static void try_to_wake_up_local(struct task_struct *p, struct rq_flags *rf)
 	trace_sched_waking(p);
 
 	if (!task_on_rq_queued(p)) {
-		u64 wallclock = ktime_get_ns();
+		u64 wallclock = sched_ktime_clock();
 
 		update_task_ravg(rq->curr, rq, TASK_UPDATE, wallclock, 0);
 		update_task_ravg(p, rq, TASK_WAKE, wallclock, 0);
@@ -2492,7 +2514,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	unsigned long flags;
 	int cpu;
 
-	init_new_task_load(p, false);
+	init_new_task_load(p);
 	cpu = get_cpu();
 
 	__sched_fork(clone_flags, p);
@@ -3247,7 +3269,7 @@ void scheduler_tick(void)
 	old_load = task_load(curr);
 	set_window_start(rq);
 
-	wallclock = ktime_get_ns();
+	wallclock = sched_ktime_clock();
 	update_task_ravg(rq->curr, rq, TASK_UPDATE, wallclock, 0);
 
 	update_rq_clock(rq);
@@ -3619,7 +3641,7 @@ static void __sched notrace __schedule(bool preempt)
 	clear_preempt_need_resched();
 	rq->clock_skip_update = 0;
 
-	wallclock = ktime_get_ns();
+	wallclock = sched_ktime_clock();
 	if (likely(prev != next)) {
 		prev->last_cpu_deselected_ts = wallclock;
 		if (!prev->on_rq)
@@ -5006,6 +5028,9 @@ again:
 		retval = -EINVAL;
 	}
 
+	if (!retval && !(p->flags & PF_KTHREAD))
+		cpumask_and(&p->cpus_requested, in_mask, cpu_possible_mask);
+
 out_free_new_mask:
 	free_cpumask_var(new_mask);
 out_free_cpus_allowed:
@@ -5518,12 +5543,11 @@ void init_idle_bootup_task(struct task_struct *idle)
  * init_idle - set up an idle thread for a given CPU
  * @idle: task in question
  * @cpu: cpu the idle task belongs to
- * @cpu_up: differentiate between initial boot vs hotplug
  *
  * NOTE: this function does not set the idle thread's NEED_RESCHED
  * flag, to make booting more robust.
  */
-void init_idle(struct task_struct *idle, int cpu, bool cpu_up)
+void init_idle(struct task_struct *idle, int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
@@ -5531,9 +5555,6 @@ void init_idle(struct task_struct *idle, int cpu, bool cpu_up)
 	scs_task_reset(idle);
 
 	__sched_fork(0, idle);
-
-	if (!cpu_up)
-		init_new_task_load(idle, true);
 
 	raw_spin_lock_irqsave(&idle->pi_lock, flags);
 	raw_spin_lock(&rq->lock);
@@ -7677,10 +7698,13 @@ struct sched_domain *build_sched_domain(struct sched_domain_topology_level *tl,
 static int build_sched_domains(const struct cpumask *cpu_map,
 			       struct sched_domain_attr *attr)
 {
-	enum s_alloc alloc_state;
+	enum s_alloc alloc_state = sa_none;
 	struct sched_domain *sd;
 	struct s_data d;
 	int i, ret = -ENOMEM;
+
+	if (WARN_ON(cpumask_empty(cpu_map)))
+		goto error;
 
 	alloc_state = __visit_domain_allocation_hell(&d, cpu_map);
 	if (alloc_state != sa_rootdomain)
@@ -8030,6 +8054,7 @@ int sched_cpu_activate(unsigned int cpu)
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
 	update_max_interval();
+	walt_update_min_max_capacity();
 
 	return 0;
 }
@@ -8071,6 +8096,7 @@ int sched_cpu_deactivate(unsigned int cpu)
 		return ret;
 	}
 	sched_domains_numa_masks_clear(cpu);
+	walt_update_min_max_capacity();
 	return 0;
 }
 
@@ -8090,6 +8116,7 @@ int sched_cpu_starting(unsigned int cpu)
 {
 	set_cpu_rq_start_time(cpu);
 	sched_rq_cpu_starting(cpu);
+	clear_walt_request(cpu);
 	return 0;
 }
 
@@ -8147,6 +8174,7 @@ void __init sched_init_smp(void)
 	/* Move init over to a non-isolated CPU */
 	if (set_cpus_allowed_ptr(current, non_isolated_cpus) < 0)
 		BUG();
+	cpumask_copy(&current->cpus_requested, cpu_possible_mask);
 	sched_init_granularity();
 	free_cpumask_var(non_isolated_cpus);
 
@@ -8367,7 +8395,8 @@ void __init sched_init(void)
 	 * but because we are the idle thread, we just pick up running again
 	 * when this runqueue becomes "idle".
 	 */
-	init_idle(current, smp_processor_id(), false);
+	init_idle(current, smp_processor_id());
+	init_new_task_load(current);
 
 	calc_load_update = jiffies + LOAD_FREQ;
 
@@ -9627,7 +9656,7 @@ void sched_exit(struct task_struct *p)
 	rq = task_rq_lock(p, &rf);
 
 	/* rq->curr == p */
-	wallclock = ktime_get_ns();
+	wallclock = sched_ktime_clock();
 	update_task_ravg(rq->curr, rq, TASK_UPDATE, wallclock, 0);
 	dequeue_task(rq, p, 0);
 	/*

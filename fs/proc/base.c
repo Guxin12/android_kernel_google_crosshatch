@@ -74,6 +74,7 @@
 #include <linux/ptrace.h>
 #include <linux/tracehook.h>
 #include <linux/printk.h>
+#include <linux/cache.h>
 #include <linux/cgroup.h>
 #include <linux/cpuset.h>
 #include <linux/audit.h>
@@ -218,9 +219,10 @@ static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
 	if (!tsk)
 		return -ESRCH;
 	mm = get_task_mm(tsk);
-	put_task_struct(tsk);
-	if (!mm)
-		return 0;
+	if (!mm) {
+		rv = 0;
+		goto out_put_task;
+	}
 	/* Check if process spawned far enough to have cmdline. */
 	if (!mm->env_end) {
 		rv = 0;
@@ -233,12 +235,12 @@ static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
 		goto out_mmput;
 	}
 
-	down_read(&mm->mmap_sem);
+	spin_lock(&mm->arg_lock);
 	arg_start = mm->arg_start;
 	arg_end = mm->arg_end;
 	env_start = mm->env_start;
 	env_end = mm->env_end;
-	up_read(&mm->mmap_sem);
+	spin_unlock(&mm->arg_lock);
 
 	BUG_ON(arg_start > arg_end);
 	BUG_ON(env_start > env_end);
@@ -393,8 +395,23 @@ out_free_page:
 	free_page((unsigned long)page);
 out_mmput:
 	mmput(mm);
+out_put_task:
+	/*
+	 * Some userland tools use empty cmdline to distinguish kthreads.
+	 * Avoid empty cmdline for user tasks by returning tsk->comm with
+	 * \0 termination when empty.
+	 */
+	if (*pos == 0 && rv == 0 && !(tsk->flags & PF_KTHREAD)) {
+		char tcomm[TASK_COMM_LEN];
+
+		get_task_comm(tcomm, tsk);
+		rv = min(strlen(tcomm) + 1, count);
+		if (copy_to_user(buf, tsk->comm, rv))
+			rv = -EFAULT;
+	}
 	if (rv > 0)
 		*pos += rv;
+	put_task_struct(tsk);
 	return rv;
 }
 
@@ -414,14 +431,17 @@ static int proc_pid_wchan(struct seq_file *m, struct pid_namespace *ns,
 	unsigned long wchan;
 	char symname[KSYM_NAME_LEN];
 
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+		goto print0;
+
 	wchan = get_wchan(task);
+	if (wchan && !lookup_symbol_name(wchan, symname)) {
+		seq_puts(m, symname);
+		return 0;
+	}
 
-	if (wchan && ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)
-			&& !lookup_symbol_name(wchan, symname))
-		seq_printf(m, "%s", symname);
-	else
-		seq_putc(m, '0');
-
+print0:
+	seq_putc(m, '0');
 	return 0;
 }
 #endif /* CONFIG_KALLSYMS */
@@ -868,7 +888,7 @@ static ssize_t mem_rw(struct file *file, char __user *buf,
 		flags |= FOLL_WRITE;
 
 	while (count > 0) {
-		int this_len = min_t(int, count, PAGE_SIZE);
+		size_t this_len = min_t(size_t, count, PAGE_SIZE);
 
 		if (write && copy_from_user(page, buf, this_len)) {
 			copied = -EFAULT;
@@ -970,10 +990,10 @@ static ssize_t environ_read(struct file *file, char __user *buf,
 	if (!atomic_inc_not_zero(&mm->mm_users))
 		goto free;
 
-	down_read(&mm->mmap_sem);
+	spin_lock(&mm->arg_lock);
 	env_start = mm->env_start;
 	env_end = mm->env_end;
-	up_read(&mm->mmap_sem);
+	spin_unlock(&mm->arg_lock);
 
 	while (count > 0) {
 		size_t this_len, max_len;
@@ -1757,9 +1777,8 @@ static int comm_show(struct seq_file *m, void *v)
 	if (!p)
 		return -ESRCH;
 
-	task_lock(p);
-	seq_printf(m, "%s\n", p->comm);
-	task_unlock(p);
+	proc_task_name(m, p, false);
+	seq_putc(m, '\n');
 
 	put_task_struct(p);
 
@@ -2081,6 +2100,8 @@ static int dname_to_vma_addr(struct dentry *dentry,
 	unsigned long long sval, eval;
 	unsigned int len;
 
+	if (str[0] == '0' && str[1] != '-')
+		return -EINVAL;
 	len = _parse_integer(str, 16, &sval);
 	if (len & KSTRTOX_OVERFLOW)
 		return -EINVAL;
@@ -2092,6 +2113,8 @@ static int dname_to_vma_addr(struct dentry *dentry,
 		return -EINVAL;
 	str++;
 
+	if (str[0] == '0' && str[1])
+		return -EINVAL;
 	len = _parse_integer(str, 16, &eval);
 	if (len & KSTRTOX_OVERFLOW)
 		return -EINVAL;
@@ -2385,6 +2408,7 @@ proc_map_files_readdir(struct file *file, struct dir_context *ctx)
 		}
 	}
 	up_read(&mm->mmap_sem);
+	mmput(mm);
 
 	for (i = 0; i < nr_files; i++) {
 		p = flex_array_get(fa, i);
@@ -2398,7 +2422,6 @@ proc_map_files_readdir(struct file *file, struct dir_context *ctx)
 	}
 	if (fa)
 		flex_array_free(fa);
-	mmput(mm);
 
 out_put_task:
 	put_task_struct(task);
@@ -2689,6 +2712,13 @@ out:
 }
 
 #ifdef CONFIG_SECURITY
+static int proc_pid_attr_open(struct inode *inode, struct file *file)
+{
+	file->private_data = NULL;
+	__mem_open(inode, file, PTRACE_MODE_READ_FSCREDS);
+	return 0;
+}
+
 static ssize_t proc_pid_attr_read(struct file * file, char __user * buf,
 				  size_t count, loff_t *ppos)
 {
@@ -2717,6 +2747,10 @@ static ssize_t proc_pid_attr_write(struct file * file, const char __user * buf,
 	void *page;
 	ssize_t length;
 	struct task_struct *task = get_proc_task(inode);
+
+	/* A task may only write when it was the opener. */
+	if (file->private_data != current->mm)
+		return -EPERM;
 
 	length = -ESRCH;
 	if (!task)
@@ -2753,9 +2787,11 @@ out_no_task:
 }
 
 static const struct file_operations proc_pid_attr_operations = {
+	.open		= proc_pid_attr_open,
 	.read		= proc_pid_attr_read,
 	.write		= proc_pid_attr_write,
 	.llseek		= generic_file_llseek,
+	.release	= mem_release,
 };
 
 static const struct pid_entry attr_dir_stuff[] = {

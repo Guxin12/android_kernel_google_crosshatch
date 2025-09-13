@@ -555,7 +555,7 @@ int kgsl_context_init(struct kgsl_device_private *dev_priv,
 	 */
 	spin_lock(&proc_priv->ctxt_count_lock);
 	if (atomic_read(&proc_priv->ctxt_count) > KGSL_MAX_CONTEXTS_PER_PROC) {
-		KGSL_DRV_ERR(device,
+		KGSL_DRV_ERR_RATELIMIT(device,
 			"Per process context limit reached for pid %u",
 			pid_nr(dev_priv->process_priv->pid));
 		spin_unlock(&proc_priv->ctxt_count_lock);
@@ -780,7 +780,7 @@ static int kgsl_suspend_device(struct kgsl_device *device, pm_message_t state)
 
 	mutex_lock(&device->mutex);
 	status = kgsl_pwrctrl_change_state(device, KGSL_STATE_SUSPEND);
-	if (status == 0)
+	if (status == 0 && device->state == KGSL_STATE_SUSPEND)
 		device->ftbl->dispatcher_halt(device);
 	mutex_unlock(&device->mutex);
 
@@ -1147,7 +1147,8 @@ static int kgsl_release(struct inode *inodep, struct file *filep)
 	/* Close down the process wide resources for the file */
 	kgsl_process_private_close(dev_priv, dev_priv->process_priv);
 
-	kfree(dev_priv);
+	/* Destroy the device-specific structure */
+	device->ftbl->device_private_destroy(dev_priv);
 
 	result = kgsl_close_device(device);
 	pm_runtime_put(&device->pdev->dev);
@@ -1215,7 +1216,7 @@ static int kgsl_open(struct inode *inodep, struct file *filep)
 	}
 	result = 0;
 
-	dev_priv = kzalloc(sizeof(struct kgsl_device_private), GFP_KERNEL);
+	dev_priv = device->ftbl->device_private_create();
 	if (dev_priv == NULL) {
 		result = -ENOMEM;
 		goto err;
@@ -1271,7 +1272,7 @@ kgsl_sharedmem_find(struct kgsl_process_private *private, uint64_t gpuaddr)
 	if (!private)
 		return NULL;
 
-	if (!kgsl_mmu_gpuaddr_in_range(private->pagetable, gpuaddr))
+	if (!kgsl_mmu_gpuaddr_in_range(private->pagetable, gpuaddr, 0))
 		return NULL;
 
 	spin_lock(&private->mem_lock);
@@ -1422,6 +1423,45 @@ long kgsl_ioctl_device_getproperty(struct kgsl_device_private *dev_priv,
 		}
 
 		kgsl_context_put(context);
+		break;
+	}
+	case KGSL_PROP_SECURE_BUFFER_ALIGNMENT:
+	{
+		unsigned int align;
+
+		if (param->sizebytes != sizeof(unsigned int)) {
+			result = -EINVAL;
+			break;
+		}
+		/*
+		 * XPUv2 impose the constraint of 1MB memory alignment,
+		 * on the other hand Hypervisor does not have such
+		 * constraints. So driver should fulfill such
+		 * requirements when allocating secure memory.
+		 */
+		align = MMU_FEATURE(&dev_priv->device->mmu,
+				KGSL_MMU_HYP_SECURE_ALLOC) ? PAGE_SIZE : SZ_1M;
+
+		if (copy_to_user(param->value, &align, sizeof(align)))
+			result = -EFAULT;
+
+		break;
+	}
+	case KGSL_PROP_SECURE_CTXT_SUPPORT:
+	{
+		unsigned int secure_ctxt;
+
+		if (param->sizebytes != sizeof(unsigned int)) {
+			result = -EINVAL;
+			break;
+		}
+
+		secure_ctxt = dev_priv->device->mmu.secured ? 1 : 0;
+
+		if (copy_to_user(param->value, &secure_ctxt,
+				sizeof(secure_ctxt)))
+			result = -EFAULT;
+
 		break;
 	}
 	default:
@@ -2006,7 +2046,7 @@ static long gpuobj_free_on_fence(struct kgsl_device_private *dev_priv,
 	}
 
 	handle = kgsl_sync_fence_async_wait(event.fd,
-		gpuobj_free_fence_func, entry, NULL, 0);
+		gpuobj_free_fence_func, entry, NULL);
 
 	if (IS_ERR(handle)) {
 		kgsl_mem_entry_unset_pend(entry);
@@ -2204,15 +2244,6 @@ static int kgsl_setup_anon_useraddr(struct kgsl_pagetable *pagetable,
 }
 
 #ifdef CONFIG_DMA_SHARED_BUFFER
-static int match_file(const void *p, struct file *file, unsigned int fd)
-{
-	/*
-	 * We must return fd + 1 because iterate_fd stops searching on
-	 * non-zero return, but 0 is a valid fd.
-	 */
-	return (p == file) ? (fd + 1) : 0;
-}
-
 static void _setup_cache_mode(struct kgsl_mem_entry *entry,
 		struct vm_area_struct *vma)
 {
@@ -2250,8 +2281,6 @@ static int kgsl_setup_dmabuf_useraddr(struct kgsl_device *device,
 	vma = find_vma(current->mm, hostptr);
 
 	if (vma && vma->vm_file) {
-		int fd;
-
 		ret = check_vma_flags(vma, entry->memdesc.flags);
 		if (ret) {
 			up_read(&current->mm->mmap_sem);
@@ -2267,10 +2296,13 @@ static int kgsl_setup_dmabuf_useraddr(struct kgsl_device *device,
 			return -EFAULT;
 		}
 
-		/* Look for the fd that matches this the vma file */
-		fd = iterate_fd(current->files, 0, match_file, vma->vm_file);
-		if (fd != 0)
-			dmabuf = dma_buf_get(fd - 1);
+		/*
+		 * Take a refcount because dma_buf_put() decrements the
+		 * refcount
+		 */
+		get_file(vma->vm_file);
+
+		dmabuf = vma->vm_file->private_data;
 	}
 
 	if (IS_ERR_OR_NULL(dmabuf)) {
@@ -4830,7 +4862,6 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 		device->id, device->reg_phys, device->reg_len);
 
 	rwlock_init(&device->context_lock);
-	spin_lock_init(&device->submit_lock);
 
 	setup_timer(&device->idle_timer, kgsl_timer, (unsigned long) device);
 
@@ -4974,7 +5005,7 @@ static void kgsl_core_exit(void)
 static int __init kgsl_core_init(void)
 {
 	int result = 0;
-	struct sched_param param = { .sched_priority = 2 };
+	struct sched_param param = { .sched_priority = 16 };
 
 	/* alloc major and minor device numbers */
 	result = alloc_chrdev_region(&kgsl_driver.major, 0, KGSL_DEVICE_MAX,

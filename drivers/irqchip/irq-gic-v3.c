@@ -1026,7 +1026,6 @@ static void gic_send_sgi(u64 cluster_id, u16 tlist, unsigned int irq)
 	       MPIDR_TO_SGI_AFFINITY(cluster_id, 1)	|
 	       tlist << ICC_SGI1R_TARGET_LIST_SHIFT);
 
-	pr_devel("CPU%d: ICC_SGI1R_EL1 %llx\n", smp_processor_id(), val);
 	gic_write_sgi1r(val);
 }
 
@@ -1412,7 +1411,7 @@ static int get_cpu_number(struct device_node *dn)
 {
 	const __be32 *cell;
 	u64 hwid;
-	int i;
+	int cpu;
 
 	cell = of_get_property(dn, "reg", NULL);
 	if (!cell)
@@ -1426,9 +1425,9 @@ static int get_cpu_number(struct device_node *dn)
 	if (hwid & ~MPIDR_HWID_BITMASK)
 		return -1;
 
-	for (i = 0; i < num_possible_cpus(); i++)
-		if (cpu_logical_map(i) == hwid)
-			return i;
+	for_each_possible_cpu(cpu)
+		if (cpu_logical_map(cpu) == hwid)
+			return cpu;
 
 	return -1;
 }

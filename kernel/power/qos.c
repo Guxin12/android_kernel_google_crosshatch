@@ -879,6 +879,9 @@ static ssize_t pm_qos_power_write(struct file *filp, const char __user *buf,
 	s32 value;
 	struct pm_qos_request *req;
 
+	/* Don't let userspace impose restrictions on CPU idle levels */
+	return count;
+
 	if (count == sizeof(s32)) {
 		if (copy_from_user(&value, buf, sizeof(s32)))
 			return -EFAULT;
@@ -888,6 +891,15 @@ static ssize_t pm_qos_power_write(struct file *filp, const char __user *buf,
 		ret = kstrtos32_from_user(buf, count, 16, &value);
 		if (ret)
 			return ret;
+	}
+
+	switch (value) {
+		case 0x44:
+			value = 44;
+			break;
+		case 0x100:
+			return count;
+			break;
 	}
 
 	req = filp->private_data;
