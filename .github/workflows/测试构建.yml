@@ -6,7 +6,7 @@ on:
       branch:
         description: "选择要编译的分支"
         required: true
-        default: "ACF1"
+        default: "ACF6"
       tag_name:
         description: "Release 标签 (例如 v1.0)"
         required: true
@@ -22,7 +22,7 @@ jobs:
         with:
           repository: Guxin12/android_kernel_google_crosshatch
           ref: ${{ github.event.inputs.branch }}
-          submodules: recursive   # ✅ 拉取子模块
+          submodules: recursive
 
       - name: 设置 ccache
         uses: actions/cache@v3
@@ -36,42 +36,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            git \
-            curl \
-            wget \
-            unzip \
-            zip \
-            make \
-            patch \
-            ccache \
-            python3 \
-            python3-distutils \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libncurses-dev \
-            libssl-dev \
-            libelf-dev \
-            lld \
-            llvm \
-            clang \
-            gcc \
-            g++ \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabihf \
-            gcc-arm-linux-gnueabi \
-            binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabi \
-            fakeroot \
-            kmod \
-            rsync \
-            u-boot-tools \
-            tar \
-            xz-utils
+            build-essential bc bison flex git curl wget unzip zip make patch ccache \
+            python3 python3-distutils libncurses5-dev libncursesw5-dev libncurses-dev \
+            libssl-dev libelf-dev lld llvm clang gcc g++ gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi fakeroot kmod rsync u-boot-tools tar xz-utils
 
+      # -------------------- Clang 缓存下载 --------------------
       - name: Clang 缓存
         uses: actions/cache@v3
         id: clang-cache
@@ -90,6 +61,15 @@ jobs:
           mkdir -p clang-android
           tar -xf clang-r416183b.tar.gz -C clang-android
 
+      # -------------------- Clang 缓存上传 --------------------
+      - name: 上传 Clang 缓存
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v3
+        with:
+          path: ~/toolchains/clang-android
+          key: clang-r416183b
+
+      # -------------------- 设置环境变量 --------------------
       - name: 设置环境变量
         run: |
           echo "PATH=$HOME/toolchains/clang-android/bin:$PATH" >> $GITHUB_ENV
@@ -98,15 +78,21 @@ jobs:
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
 
+      # -------------------- 配置内核 --------------------
       - name: 配置内核
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
           export KBUILD_BUILD_HOST="Marble"
           export KBUILD_BUILD_USER="Guxin12"
+          # 禁用 32 位 VDSO 避免 -EL 错误
+          scripts/config --disable CONFIG_ARM64_VDSO32
           make O=out b1c1_defconfig
 
+      # -------------------- 编译内核 --------------------
       - name: 编译内核
         run: |
           export ARCH=arm64
@@ -115,15 +101,22 @@ jobs:
           export KBUILD_BUILD_USER="Guxin12"
           make -j$(nproc) O=out \
             CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
+      # -------------------- 打包内核 --------------------
       - name: 打包内核
         run: |
           cd out/arch/arm64/boot
           zip -r9 kernel-${{ github.event.inputs.tag_name }}.zip Image.gz-dtb
 
+      # -------------------- 上传 Release --------------------
       - name: 上传 Release
         uses: softprops/action-gh-release@v1
         with:
