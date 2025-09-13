@@ -1,4 +1,4 @@
-name: 编译谷歌4.9内核
+name: 编译谷歌4.9内核 (使用系统Clang)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,11 @@ on:
       branch:
         description: "选择要编译的分支"
         required: true
-        default: "ACF6"
+        default: "ACF2"
+      target:
+        description: "编译目标 (Image/modules/all)"
+        required: true
+        default: "all"
       tag_name:
         description: "Release 标签 (例如 v1.0)"
         required: true
@@ -17,7 +21,6 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # -------------------- 检出源码 --------------------
       - name: 检查源码（含子模块）
         uses: actions/checkout@v3
         with:
@@ -25,7 +28,6 @@ jobs:
           ref: ${{ github.event.inputs.branch }}
           submodules: recursive
 
-      # -------------------- 设置 ccache --------------------
       - name: 设置 ccache
         uses: actions/cache@v3
         with:
@@ -34,7 +36,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-
 
-      # -------------------- 安装依赖 --------------------
       - name: 安装依赖
         run: |
           sudo apt-get update
@@ -43,39 +44,192 @@ jobs:
             python3 python3-distutils libncurses5-dev libncursesw5-dev libncurses-dev \
             libssl-dev libelf-dev lld llvm clang gcc g++ gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabihf gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabi fakeroot kmod rsync u-boot-tools tar xz-utils
+            binutils-arm-linux-gnueabi fakeroot kmod rsync u-boot-tools tar xz-utils \
+            clang-14 llvm-14 llvm-14-dev
 
-      # -------------------- Clang 缓存下载 --------------------
-      - name: Clang 缓存
-        uses: actions/cache@v3
-        id: clang-cache
-        with:
-          path: ~/toolchains/clang-android
-          key: clang-r416183b
-          restore-keys: |
-            clang-r416183b
-
-      - name: 下载 Clang (clang-r416183b)
-        if: steps.clang-cache.outputs.cache-hit != 'true'
+      # -------------------- 复制并修改编译脚本 --------------------
+      - name: 复制编译脚本
         run: |
-          mkdir -p ~/toolchains
-          cd ~/toolchains
-          curl -L https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/428d18d9732aa7ebfcaed87a582d86155db878d4/clang-r416183b.tar.gz -o clang-r416183b.tar.gz
-          mkdir -p clang-android
-          tar -xf clang-r416183b.tar.gz -C clang-android
-
-      - name: 上传 Clang 缓存
-        if: steps.clang-cache.outputs.cache-hit != 'true'
-        uses: actions/cache@v3
-        with:
-          path: ~/toolchains/clang-android
-          key: clang-r416183b
+          # 将提供的shell脚本复制到工作目录
+          cat << 'EOF' > clang-r399163.sh
+          #!/bin/bash
+          starttime=$(date +'%Y-%m-%d %H:%M:%S')
+          
+          # 一般只修改KD,KERNEL值就可以了，其他几乎可不动。
+          export KERNEL=Image
+          export KD=b1c1_defconfig
+          
+          # 默认执行完整编译（包括模块和打包）
+          DO_PACKAGE=1
+          BUILD_MODULES=1
+          
+          # 解析命令行参数
+          for arg in "$@"
+          do
+              case $arg in
+                  target=Image)
+                      DO_PACKAGE=0
+                      BUILD_MODULES=0
+                      echo "设置为只编译内核，不编译模块，不打包"
+                      ;;
+                  target=modules)
+                      DO_PACKAGE=0
+                      BUILD_MODULES=1
+                      echo "设置为编译内核和模块，不打包"
+                      ;;
+                  target=all)
+                      DO_PACKAGE=1
+                      BUILD_MODULES=1
+                      echo "设置为完整编译（内核+模块+打包）"
+                      ;;
+              esac
+          done
+          
+          echo "你设置的内核配置文件为$KD,并打印在kernel-defconfig.log"
+          
+          # 设置编译环境
+          export ARCH=arm64
+          export SUBARCH=arm64
+          
+          # 设置LLVM黄金插件路径 - 使用系统LLVM
+          export LLVM_GOLD_PATH=/usr/lib/llvm-14/lib/LLVMgold.so
+          export LD_LIBRARY_PATH="/usr/lib/llvm-14/lib:$LD_LIBRARY_PATH"
+          
+          # 使用系统Clang，不尝试自定义工具链
+          echo "使用系统Clang工具链"
+          
+          # 检查必要的工具是否存在
+          check_tool() {
+              if ! command -v "$1" >/dev/null 2>&1; then
+                  echo "错误: 找不到 $1，请检查工具链路径"
+                  echo "当前PATH: $PATH"
+                  return 1
+              fi
+              echo "找到工具: $1 ($(command -v "$1"))"
+              return 0
+          }
+          
+          echo "检查必要的工具..."
+          if ! check_tool clang; then
+              exit 1
+          fi
+          
+          # 检查交叉编译工具
+          if ! check_tool aarch64-linux-gnu-gcc; then
+              echo "警告: 找不到aarch64-linux-gnu-gcc，尝试使用系统gcc"
+              # 如果找不到交叉编译工具，尝试使用系统gcc
+              if command -v gcc >/dev/null 2>&1; then
+                  echo "使用系统gcc作为替代"
+              else
+                  echo "错误: 也找不到系统gcc，请安装gcc或交叉编译工具链"
+                  exit 1
+              fi
+          fi
+          
+          if ! check_tool make; then
+              echo "错误: 找不到make，请安装make"
+              exit 1
+          fi
+          
+          # 构建参数
+          args="-j$(nproc) \
+          ARCH=arm64 \
+          SUBARCH=arm64 \
+          O=out \
+          CC=clang"
+          
+          # 如果找到交叉编译工具，添加交叉编译参数
+          if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+              args="$args CROSS_COMPILE=aarch64-linux-gnu-"
+              if command -v arm-linux-gnueabi-gcc >/dev/null 2>&1; then
+                  args="$args CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+              fi
+          fi
+          
+          # 使用gold链接器与LLVM插件
+          echo "使用gold链接器与LLVM插件"
+          args="$args LD=ld.gold"
+          
+          # 使用系统LLVM
+          args="$args LLVM=1"
+          
+          echo "编译环境清理中..."
+          make clean && make mrproper
+          rm -f kernel.log kernel-defconfig.log && rm -rf out 
+          mkdir -p out
+          
+          # 记录配置信息
+          echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" > ./kernel-defconfig.log 
+          echo "时间_$(date +'%Y-%m-%d %H:%M:%S')----内核配置为_$KD" >> ./kernel-defconfig.log
+          echo "编译器路径: $(command -v clang)" >> ./kernel-defconfig.log
+          echo "工具链类型: 系统Clang" >> ./kernel-defconfig.log
+          echo "LLVMgold.so路径: $LLVM_GOLD_PATH" >> ./kernel-defconfig.log
+          echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH" >> ./kernel-defconfig.log
+          echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" >> ./kernel-defconfig.log
+          
+          echo "编译器信息:"
+          clang --version
+          echo "开始构建内核..."
+          echo "时间为_$(date +'%Y-%m-%d %H:%M:%S')----内核配置为_$KD"
+          
+          # 配置内核
+          echo "配置内核..."
+          make $args $KD
+          
+          # 编译内核
+          echo "编译内核镜像..."
+          make $args $KERNEL 2>&1 | tee kernel.log
+          
+          # 如果需要，编译内核模块
+          if [ $BUILD_MODULES -eq 1 ]; then
+              echo "编译内核模块..."
+              make $args modules 2>&1 | tee -a kernel.log
+          fi
+          
+          # 检查编译是否成功
+          if [ -f "./out/arch/${ARCH}/boot/${KERNEL}" ]; then
+              echo "构建内核成功"
+              
+              # 根据参数决定是否打包
+              if [ $DO_PACKAGE -eq 1 ]; then
+                  echo "开始打包内核..."
+                  # 这里添加您的打包命令
+                  # 例如：使用AnyKernel3进行打包
+                  # cp ./out/arch/${ARCH}/boot/${KERNEL} /path/to/anykernel3/
+                  # cd /path/to/anykernel3 && zip -r /mnt/kernel-$(date +%Y%m%d-%H%M).zip .
+                  echo "内核产品在/mnt目录下，名称为 kernel+日期形式的zip包，可通过twrp或ex内核管理器刷入，验证"
+              else
+                  echo "跳过打包步骤"
+                  echo "内核镜像在: ./out/arch/${ARCH}/boot/${KERNEL}"
+                  
+                  if [ $BUILD_MODULES -eq 1 ]; then
+                      echo "内核模块在: ./out/"
+                  fi
+              fi
+          else
+              echo "构建内核失败，请检查kernel.log"
+              # 显示错误摘要
+              grep -i "error:" kernel.log | tail -10
+              exit 1
+          fi
+          
+          # 耗时统计
+          echo "--------------------------------"
+          endtime=$(date +'%Y-%m-%d %H:%M:%S')
+          start_seconds=$(date --date="$starttime" +%s)
+          end_seconds=$(date --date="$endtime" +%s)
+          echo "开始时间: $starttime."
+          echo "结束时间: $endtime."
+          echo "编译耗时: "$((end_seconds-start_seconds))"s."
+          echo "--------------------------------"
+          EOF
+          
+          # 给脚本添加执行权限
+          chmod +x clang-r399163.sh
 
       # -------------------- 设置环境变量 --------------------
       - name: 设置环境变量
         run: |
-          CLANG_PATH="$HOME/toolchains/clang-android"
-          echo "PATH=$CLANG_PATH/bin:$PATH" >> $GITHUB_ENV
           echo "CC=clang" >> $GITHUB_ENV
           echo "CXX=clang++" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
@@ -83,50 +237,18 @@ jobs:
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
-          # 设置 LD_LIBRARY_PATH 指向 clang 的 lib64
-          echo "LD_LIBRARY_PATH=$CLANG_PATH/lib64:\$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/lib/llvm-14/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
-      # -------------------- 清理上一次编译残留 --------------------
-      - name: 清理上一次编译残留
+      # -------------------- 运行编译脚本 --------------------
+      - name: 运行编译脚本
         run: |
-          make mrproper
-
-      # -------------------- 配置内核 --------------------
-      - name: 配置内核
-        run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export KBUILD_BUILD_HOST="Marble"
-          export KBUILD_BUILD_USER="Guxin12"
-          # 先生成 defconfig
-          make O=out b1c1_defconfig
-          # 禁用 32 位 VDSO 并生效
-          sed -i 's/CONFIG_ARM64_VDSO32=y/CONFIG_ARM64_VDSO32=n/' out/.config || true
-          make O=out olddefconfig
-
-      # -------------------- 编译内核 --------------------
-      - name: 编译内核
-        run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export KBUILD_BUILD_HOST="Marble"
-          export KBUILD_BUILD_USER="Guxin12"
-          make -j$(nproc) O=out \
-            CC="ccache clang" \
-            LD=ld.lld \
-            AR=llvm-ar \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          ./clang-r399163.sh target=${{ github.event.inputs.target }}
 
       # -------------------- 打包内核 --------------------
       - name: 打包内核
         run: |
           cd out/arch/arm64/boot
-          zip -r9 kernel-${{ github.event.inputs.tag_name }}.zip Image.gz-dtb
+          zip -r9 kernel-${{ github.event.inputs.tag_name }}.zip Image
 
       # -------------------- 上传 Release --------------------
       - name: 上传 Release
