@@ -1,40 +1,82 @@
-name: Kernel Builder
+name: 编译谷歌4.9内核
 
 on:
   workflow_dispatch:
     inputs:
-      build_mode:
-        description: "选择编译模式"
-        type: choice
-        options:
-          - 只编译内核
-          - 只编译内核模块
-          - 编译内核和内核模块
+      branch:
+        description: "选择要编译的分支"
         required: true
-        default: 只编译内核
-      kpm_patch:
-        description: "是否添加KPM修补？"
-        type: boolean
+        default: "android-4.9"
+      tag_name:
+        description: "Release 标签 (例如 v1.0)"
         required: true
-        default: false
-      thin_lto:
-        description: "是否启用ThinLTO？"
-        type: boolean
-        required: true
-        default: true
+        default: "v1.0"
 
 jobs:
   build:
-    permissions:
-      contents: write
-
     runs-on: ubuntu-22.04
-    env:
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
-      CCACHE_NOHASHDIR: "true"
-      CCACHE_HARDLINK: "true"
 
     steps:
+      - name: 检查源码
+        uses: actions/checkout@v3
+        with:
+          repository: Guxin12/android_kernel_google_crosshatch
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: 设置 ccache
+        uses: actions/cache@v3
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-kernel-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache flex git \
+            libncurses5-dev libssl-dev curl zip unzip python3
+
+      - name: 下载 Clang 12
+        run: |
+          mkdir -p ~/toolchains
+          cd ~/toolchains
+          wget https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-20.04.tar.xz
+          tar -xf clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-20.04.tar.xz
+          mv clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-20.04 clang-12
+
+      - name: 设置环境变量
+        run: |
+          echo "PATH=$HOME/toolchains/clang-12/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "CXX=clang++" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
+
+      - name: 配置内核
+        run: |
+          make O=out ARCH=arm64 b1c1_defconfig
+
+      - name: 编译内核
+        run: |
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC="ccache clang" \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+      - name: 打包内核
+        run: |
+          cd out/arch/arm64/boot
+          zip -r9 kernel-${{ github.event.inputs.tag_name }}.zip Image.gz-dtb
+
+      - name: 上传 Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.tag_name }}
+          files: out/arch/arm64/boot/kernel-${{ github.event.inputs.tag_name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}    steps:
       - name: 安装编译依赖
         run: |
           sudo apt-get update
