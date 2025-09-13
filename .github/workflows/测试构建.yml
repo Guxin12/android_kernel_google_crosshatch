@@ -35,21 +35,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache flex git \
-            libncurses5-dev libssl-dev curl zip unzip python3
+            libncurses5-dev libssl-dev curl zip unzip python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: 下载 Clang 12
+      - name: 下载 Clang (clang-r416183b)
         run: |
           mkdir -p ~/toolchains
           cd ~/toolchains
-          wget https://github.com/llvm/llvm-project/releases/download/llvmorg-12.0.1/clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-20.04.tar.xz
-          tar -xf clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-20.04.tar.xz
-          mv clang+llvm-12.0.1-x86_64-linux-gnu-ubuntu-20.04 clang-12
+          curl -L https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/428d18d9732aa7ebfcaed87a582d86155db878d4/clang-r416183b.tar.gz -o clang-r416183b.tar.gz
+          mkdir clang-android
+          tar -xf clang-r416183b.tar.gz -C clang-android
 
       - name: 设置环境变量
         run: |
-          echo "PATH=$HOME/toolchains/clang-12/bin:$PATH" >> $GITHUB_ENV
+          echo "PATH=$HOME/toolchains/clang-android/bin:$PATH" >> $GITHUB_ENV
           echo "CC=clang" >> $GITHUB_ENV
           echo "CXX=clang++" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
 
