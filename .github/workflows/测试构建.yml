@@ -17,11 +17,12 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: 检查源码
+      - name: 检查源码（含子模块）
         uses: actions/checkout@v3
         with:
           repository: Guxin12/android_kernel_google_crosshatch
           ref: ${{ github.event.inputs.branch }}
+          submodules: recursive   # ✅ 拉取子模块
 
       - name: 设置 ccache
         uses: actions/cache@v3
@@ -71,12 +72,22 @@ jobs:
             tar \
             xz-utils
 
+      - name: Clang 缓存
+        uses: actions/cache@v3
+        id: clang-cache
+        with:
+          path: ~/toolchains/clang-android
+          key: clang-r416183b
+          restore-keys: |
+            clang-r416183b
+
       - name: 下载 Clang (clang-r416183b)
+        if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/toolchains
           cd ~/toolchains
           curl -L https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/428d18d9732aa7ebfcaed87a582d86155db878d4/clang-r416183b.tar.gz -o clang-r416183b.tar.gz
-          mkdir clang-android
+          mkdir -p clang-android
           tar -xf clang-r416183b.tar.gz -C clang-android
 
       - name: 设置环境变量
