@@ -90,6 +90,7 @@ jobs:
           export KBUILD_BUILD_USER="Guxin12"
           # 禁用 32 位 VDSO 避免 -EL 错误
           scripts/config --disable CONFIG_ARM64_VDSO32
+          make mrproper
           make O=out b1c1_defconfig
 
       # -------------------- 编译内核 --------------------
