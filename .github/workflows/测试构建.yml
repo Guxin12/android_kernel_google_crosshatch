@@ -98,8 +98,8 @@ jobs:
 
           echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
 
-          make LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- O=out mrproper
-          make LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- O=out b1c1_defconfig
+          make LLVM=1 LLVM_IAS=1 O=out mrproper
+          make LLVM=1 LLVM_IAS=1 O=out b1c1_defconfig
           
           # 根据输入配置ThinLTO
           if [ "${{ github.event.inputs.thin_lto }}" = "true" ]; then
@@ -119,7 +119,7 @@ jobs:
             ./scripts/config --file out/.config -d CONFIG_KPM
           fi
           
-          make LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- O=out olddefconfig
+          make LLVM=1 LLVM_IAS=1 O=out olddefconfig
 
       - name: 编译内核 (如果选择)
         if: ${{ github.event.inputs.build_mode == '只编译内核' || github.event.inputs.build_mode == '编译内核和内核模块' }}
@@ -133,7 +133,7 @@ jobs:
           export CC="ccache clang"
           export CLANG_TRIPLE="aarch64-linux-gnu-"
 
-          make LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- O=out -j$(nproc --all) Image
+          make LLVM=1 LLVM_IAS=1 O=out -j$(nproc --all) Image
 
           # 生成时间戳和 short sha，并导出为 env 供后续步骤使用
           TIMESTAMP=$(date +"%Y%m%d-%H%M")
