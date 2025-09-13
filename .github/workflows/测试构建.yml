@@ -6,7 +6,7 @@ on:
       branch:
         description: "选择要编译的分支"
         required: true
-        default: "android-4.9"
+        default: "ACF1"
       tag_name:
         description: "Release 标签 (例如 v1.0)"
         required: true
@@ -34,8 +34,42 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache flex git \
-            libncurses5-dev libssl-dev curl zip unzip python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            git \
+            curl \
+            wget \
+            unzip \
+            zip \
+            make \
+            patch \
+            ccache \
+            python3 \
+            python3-distutils \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libncurses-dev \
+            libssl-dev \
+            libelf-dev \
+            lld \
+            llvm \
+            clang \
+            gcc \
+            g++ \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            fakeroot \
+            kmod \
+            rsync \
+            u-boot-tools \
+            tar \
+            xz-utils
 
       - name: 下载 Clang (clang-r416183b)
         run: |
@@ -56,11 +90,19 @@ jobs:
 
       - name: 配置内核
         run: |
-          make O=out ARCH=arm64 b1c1_defconfig
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_HOST="Marble"
+          export KBUILD_BUILD_USER="Guxin12"
+          make O=out b1c1_defconfig
 
       - name: 编译内核
         run: |
-          make -j$(nproc) O=out ARCH=arm64 \
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_HOST="Marble"
+          export KBUILD_BUILD_USER="Guxin12"
+          make -j$(nproc) O=out \
             CC="ccache clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
