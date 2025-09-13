@@ -34,10 +34,11 @@ int aa_calc_profile_hash(struct aa_profile *profile, u32 version, void *start,
 {
 	struct {
 		struct shash_desc shash;
-		char ctx[crypto_shash_descsize(apparmor_tfm)];
-	} desc;
+		char ctx[0];
+	} *desc;
 	int error = -ENOMEM;
 	u32 le32_version = cpu_to_le32(version);
+	size_t desc_size;
 
 	if (!aa_g_hash_policy)
 		return 0;
@@ -49,28 +50,36 @@ int aa_calc_profile_hash(struct aa_profile *profile, u32 version, void *start,
 	if (!profile->hash)
 		goto fail;
 
-	desc.shash.tfm = apparmor_tfm;
-	desc.shash.flags = 0;
+	desc_size = sizeof(struct shash_desc) + crypto_shash_descsize(apparmor_tfm);
+	desc = kmalloc(desc_size, GFP_KERNEL);
+	if (!desc)
+		goto fail_hash;
 
-	error = crypto_shash_init(&desc.shash);
-	if (error)
-		goto fail;
-	error = crypto_shash_update(&desc.shash, (u8 *) &le32_version, 4);
-	if (error)
-		goto fail;
-	error = crypto_shash_update(&desc.shash, (u8 *) start, len);
-	if (error)
-		goto fail;
-	error = crypto_shash_final(&desc.shash, profile->hash);
-	if (error)
-		goto fail;
+	desc->shash.tfm = apparmor_tfm;
+	desc->shash.flags = 0;
 
+	error = crypto_shash_init(&desc->shash);
+	if (error)
+		goto fail_desc;
+	error = crypto_shash_update(&desc->shash, (u8 *) &le32_version, 4);
+	if (error)
+		goto fail_desc;
+	error = crypto_shash_update(&desc->shash, (u8 *) start, len);
+	if (error)
+		goto fail_desc;
+	error = crypto_shash_final(&desc->shash, profile->hash);
+	if (error)
+		goto fail_desc;
+
+	kfree(desc);
 	return 0;
 
-fail:
+fail_desc:
+	kfree(desc);
+fail_hash:
 	kfree(profile->hash);
 	profile->hash = NULL;
-
+fail:
 	return error;
 }
 
