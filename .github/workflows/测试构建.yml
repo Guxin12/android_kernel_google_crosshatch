@@ -6,7 +6,7 @@ on:
       branch:
         description: "输入要编译的分支名称"
         required: true
-        default: "ACF1"
+        default: "ACF2"
       tag_name:
         description: "Release 标签 (例如 v1.0)"
         required: true
