@@ -77,38 +77,38 @@ jobs:
           ccache -s      # 显示ccache状态
 
       # -------------------- 编译内核镜像 --------------------
-    - name: 编译内核镜像
-      run: |
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export KBUILD_BUILD_HOST="Marble"
-        export KBUILD_BUILD_USER="Guxin12"
+      - name: 编译内核镜像
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_HOST="Marble"
+          export KBUILD_BUILD_USER="Guxin12"
         
-        echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
+          echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
         
-        make mrproper
-        make O=out b1c1_defconfig
+          make mrproper && make clean
+          make O=out b1c1_defconfig
         
-        # 新增：验证 defconfig 应用后是否有 IKCONFIG
-        echo "检查编译前的配置:"
-        grep "CONFIG_IKCONFIG" out/.config || true
-        grep "CONFIG_IKCONFIG_PROC" out/.config || true
+          # 新增：验证 defconfig 应用后是否有 IKCONFIG
+          echo "检查编译前的配置:"
+          grep "CONFIG_IKCONFIG" out/.config || true
+          grep "CONFIG_IKCONFIG_PROC" out/.config || true
         
-        make -j$(nproc) O=out \
-          CC="ccache clang" \
-          LD=ld.lld \
-          AR=llvm-ar \
-          OBJCOPY=llvm-objcopy \
-          OBJDUMP=llvm-objdump \
-          STRIP=llvm-strip \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- 
+          make -j$(nproc) O=out \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- 
     
-        # 新增：编译完成后再次检查（虽然 .config 可能因编译而更新，但 IKCONFIG 应保持不变）
-        echo "编译完成后检查配置:"
-        grep "CONFIG_IKCONFIG" out/.config || true
-        grep "CONFIG_IKCONFIG_PROC" out/.config || true
+          # 新增：编译完成后再次检查（虽然 .config 可能因编译而更新，但 IKCONFIG 应保持不变）
+          echo "编译完成后检查配置:"
+          grep "CONFIG_IKCONFIG" out/.config || true
+          grep "CONFIG_IKCONFIG_PROC" out/.config || true
 
 
           # 生成时间戳和 short sha，并导出为 env 供后续步骤使用
