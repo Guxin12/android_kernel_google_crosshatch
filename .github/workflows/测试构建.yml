@@ -86,7 +86,8 @@ jobs:
         
           echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
         
-          make mrproper && make clean
+          make mrproper
+          make clean
           make O=out b1c1_defconfig
         
           # 新增：验证 defconfig 应用后是否有 IKCONFIG
@@ -103,7 +104,8 @@ jobs:
             STRIP=llvm-strip \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- 
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image
     
           # 新增：编译完成后再次检查（虽然 .config 可能因编译而更新，但 IKCONFIG 应保持不变）
           echo "编译完成后检查配置:"
