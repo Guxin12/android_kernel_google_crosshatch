@@ -87,7 +87,7 @@ jobs:
           echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
           
           # 禁用 32 位 VDSO 避免 -EL 错误
-          scripts/config --disable CONFIG_ARM64_VDSO32
+          
           make mrproper
           make O=out b1c1_defconfig
           
