@@ -10,7 +10,7 @@ on:
       target:
         description: "选择编译目标"
         required: true
-        default: "all"
+        default: "Image"
         type: choice
         options:
           - Image
@@ -96,9 +96,8 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           
-          # 设置LLVM黄金插件路径 - 使用系统LLVM
-          export LLVM_GOLD_PATH=/usr/lib/llvm-14/lib/LLVMgold.so
-          export LD_LIBRARY_PATH="/usr/lib/llvm-14/lib:$LD_LIBRARY_PATH"
+          # 使用lld链接器替代ld.gold
+          echo "使用lld链接器替代ld.gold"
           
           # 使用系统Clang，不尝试自定义工具链
           echo "使用系统Clang工具链"
@@ -119,6 +118,12 @@ jobs:
               exit 1
           fi
           
+          # 检查lld链接器
+          if ! check_tool ld.lld; then
+              echo "错误: 找不到ld.lld，请安装lld"
+              exit 1
+          fi
+          
           # 检查交叉编译工具
           if ! check_tool aarch64-linux-gnu-gcc; then
               echo "警告: 找不到aarch64-linux-gnu-gcc，尝试使用系统gcc"
@@ -136,12 +141,23 @@ jobs:
               exit 1
           fi
           
-          # 构建参数
+          # 构建参数 - 使用完整的LLVM工具链
           args="-j$(nproc) \
           ARCH=arm64 \
           SUBARCH=arm64 \
           O=out \
-          CC=clang"
+          CC=clang \
+          LD=ld.lld \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          STRIP=llvm-strip \
+          READELF=llvm-readelf \
+          HOSTCC=clang \
+          HOSTCXX=clang++ \
+          HOSTAR=llvm-ar \
+          HOSTLD=ld.lld"
           
           # 如果找到交叉编译工具，添加交叉编译参数
           if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
@@ -150,10 +166,6 @@ jobs:
                   args="$args CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
               fi
           fi
-          
-          # 使用gold链接器与LLVM插件
-          echo "使用gold链接器与LLVM插件"
-          args="$args LD=ld.gold"
           
           # 使用系统LLVM
           args="$args LLVM=1"
@@ -167,13 +179,14 @@ jobs:
           echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" > ./kernel-defconfig.log 
           echo "时间_$(date +'%Y-%m-%d %H:%M:%S')----内核配置为_$KD" >> ./kernel-defconfig.log
           echo "编译器路径: $(command -v clang)" >> ./kernel-defconfig.log
-          echo "工具链类型: 系统Clang" >> ./kernel-defconfig.log
-          echo "LLVMgold.so路径: $LLVM_GOLD_PATH" >> ./kernel-defconfig.log
-          echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH" >> ./kernel-defconfig.log
+          echo "链接器路径: $(command -v ld.lld)" >> ./kernel-defconfig.log
+          echo "工具链类型: 系统Clang + LLVM工具链" >> ./kernel-defconfig.log
           echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" >> ./kernel-defconfig.log
           
           echo "编译器信息:"
           clang --version
+          echo "链接器信息:"
+          ld.lld --version
           echo "开始构建内核..."
           echo "时间为_$(date +'%Y-%m-%d %H:%M:%S')----内核配置为_$KD"
           
@@ -242,7 +255,12 @@ jobs:
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/lib/llvm-14/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "NM=llvm-nm" >> $GITHUB_ENV
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
 
       # -------------------- 运行编译脚本 --------------------
       - name: 运行编译脚本
