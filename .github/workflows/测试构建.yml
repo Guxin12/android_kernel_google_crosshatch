@@ -1,4 +1,4 @@
-name: 编译谷歌4.9内核 (使用系统Clang)
+name: 编译谷歌4.9内核
 
 on:
   workflow_dispatch:
@@ -6,16 +6,7 @@ on:
       branch:
         description: "输入要编译的分支名称"
         required: true
-        default: "ACF2"
-      target:
-        description: "选择编译目标"
-        required: true
-        default: "Image"
-        type: choice
-        options:
-          - Image
-          - modules
-          - all
+        default: "ACF1"
       tag_name:
         description: "Release 标签 (例如 v1.0)"
         required: true
@@ -23,7 +14,15 @@ on:
 
 jobs:
   build:
+    # 确保 GITHUB_TOKEN 有写权限以便创建 tag/release/上传 release asset
+    permissions:
+      contents: write
+
     runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
 
     steps:
       - name: 检查源码（含子模块）
@@ -52,204 +51,11 @@ jobs:
             binutils-arm-linux-gnueabi fakeroot kmod rsync u-boot-tools tar xz-utils \
             clang-14 llvm-14 llvm-14-dev
 
-      # -------------------- 复制并修改编译脚本 --------------------
-      - name: 复制编译脚本
-        run: |
-          # 将提供的shell脚本复制到工作目录
-          cat << 'EOF' > clang-r399163.sh
-          #!/bin/bash
-          starttime=$(date +'%Y-%m-%d %H:%M:%S')
-          
-          # 一般只修改KD,KERNEL值就可以了，其他几乎可不动。
-          export KERNEL=Image
-          export KD=b1c1_defconfig
-          
-          # 默认执行完整编译（包括模块和打包）
-          DO_PACKAGE=1
-          BUILD_MODULES=1
-          
-          # 解析命令行参数
-          for arg in "$@"
-          do
-              case $arg in
-                  target=Image)
-                      DO_PACKAGE=0
-                      BUILD_MODULES=0
-                      echo "设置为只编译内核，不编译模块，不打包"
-                      ;;
-                  target=modules)
-                      DO_PACKAGE=0
-                      BUILD_MODULES=1
-                      echo "设置为编译内核和模块，不打包"
-                      ;;
-                  target=all)
-                      DO_PACKAGE=1
-                      BUILD_MODULES=1
-                      echo "设置为完整编译（内核+模块+打包）"
-                      ;;
-              esac
-          done
-          
-          echo "你设置的内核配置文件为$KD,并打印在kernel-defconfig.log"
-          
-          # 设置编译环境
-          export ARCH=arm64
-          export SUBARCH=arm64
-          
-          # 使用lld链接器替代ld.gold
-          echo "使用lld链接器替代ld.gold"
-          
-          # 使用系统Clang，不尝试自定义工具链
-          echo "使用系统Clang工具链"
-          
-          # 检查必要的工具是否存在
-          check_tool() {
-              if ! command -v "$1" >/dev/null 2>&1; then
-                  echo "错误: 找不到 $1，请检查工具链路径"
-                  echo "当前PATH: $PATH"
-                  return 1
-              fi
-              echo "找到工具: $1 ($(command -v "$1"))"
-              return 0
-          }
-          
-          echo "检查必要的工具..."
-          if ! check_tool clang; then
-              exit 1
-          fi
-          
-          # 检查lld链接器
-          if ! check_tool ld.lld; then
-              echo "错误: 找不到ld.lld，请安装lld"
-              exit 1
-          fi
-          
-          # 检查交叉编译工具
-          if ! check_tool aarch64-linux-gnu-gcc; then
-              echo "警告: 找不到aarch64-linux-gnu-gcc，尝试使用系统gcc"
-              # 如果找不到交叉编译工具，尝试使用系统gcc
-              if command -v gcc >/dev/null 2>&1; then
-                  echo "使用系统gcc作为替代"
-              else
-                  echo "错误: 也找不到系统gcc，请安装gcc或交叉编译工具链"
-                  exit 1
-              fi
-          fi
-          
-          if ! check_tool make; then
-              echo "错误: 找不到make，请安装make"
-              exit 1
-          fi
-          
-          # 构建参数 - 使用完整的LLVM工具链
-          args="-j$(nproc) \
-          ARCH=arm64 \
-          SUBARCH=arm64 \
-          O=out \
-          CC=clang \
-          LD=ld.lld \
-          AR=llvm-ar \
-          NM=llvm-nm \
-          OBJCOPY=llvm-objcopy \
-          OBJDUMP=llvm-objdump \
-          STRIP=llvm-strip \
-          READELF=llvm-readelf \
-          HOSTCC=clang \
-          HOSTCXX=clang++ \
-          HOSTAR=llvm-ar \
-          HOSTLD=ld.lld"
-          
-          # 如果找到交叉编译工具，添加交叉编译参数
-          if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-              args="$args CROSS_COMPILE=aarch64-linux-gnu-"
-              if command -v arm-linux-gnueabi-gcc >/dev/null 2>&1; then
-                  args="$args CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
-              fi
-          fi
-          
-          # 使用系统LLVM
-          args="$args LLVM=1"
-          
-          echo "编译环境清理中..."
-          make clean && make mrproper
-          rm -f kernel.log kernel-defconfig.log && rm -rf out 
-          mkdir -p out
-          
-          # 记录配置信息
-          echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" > ./kernel-defconfig.log 
-          echo "时间_$(date +'%Y-%m-%d %H:%M:%S')----内核配置为_$KD" >> ./kernel-defconfig.log
-          echo "编译器路径: $(command -v clang)" >> ./kernel-defconfig.log
-          echo "链接器路径: $(command -v ld.lld)" >> ./kernel-defconfig.log
-          echo "工具链类型: 系统Clang + LLVM工具链" >> ./kernel-defconfig.log
-          echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" >> ./kernel-defconfig.log
-          
-          echo "编译器信息:"
-          clang --version
-          echo "链接器信息:"
-          ld.lld --version
-          echo "开始构建内核..."
-          echo "时间为_$(date +'%Y-%m-%d %H:%M:%S')----内核配置为_$KD"
-          
-          # 配置内核
-          echo "配置内核..."
-          make $args $KD
-          
-          # 编译内核
-          echo "编译内核镜像..."
-          make $args $KERNEL 2>&1 | tee kernel.log
-          
-          # 如果需要，编译内核模块
-          if [ $BUILD_MODULES -eq 1 ]; then
-              echo "编译内核模块..."
-              make $args modules 2>&1 | tee -a kernel.log
-          fi
-          
-          # 检查编译是否成功
-          if [ -f "./out/arch/${ARCH}/boot/${KERNEL}" ]; then
-              echo "构建内核成功"
-              
-              # 根据参数决定是否打包
-              if [ $DO_PACKAGE -eq 1 ]; then
-                  echo "开始打包内核..."
-                  # 这里添加您的打包命令
-                  # 例如：使用AnyKernel3进行打包
-                  # cp ./out/arch/${ARCH}/boot/${KERNEL} /path/to/anykernel3/
-                  # cd /path/to/anykernel3 && zip -r /mnt/kernel-$(date +%Y%m%d-%H%M).zip .
-                  echo "内核产品在/mnt目录下，名称为 kernel+日期形式的zip包，可通过twrp或ex内核管理器刷入，验证"
-              else
-                  echo "跳过打包步骤"
-                  echo "内核镜像在: ./out/arch/${ARCH}/boot/${KERNEL}"
-                  
-                  if [ $BUILD_MODULES -eq 1 ]; then
-                      echo "内核模块在: ./out/"
-                  fi
-              fi
-          else
-              echo "构建内核失败，请检查kernel.log"
-              # 显示错误摘要
-              grep -i "error:" kernel.log | tail -10
-              exit 1
-          fi
-          
-          # 耗时统计
-          echo "--------------------------------"
-          endtime=$(date +'%Y-%m-%d %H:%M:%S')
-          start_seconds=$(date --date="$starttime" +%s)
-          end_seconds=$(date --date="$endtime" +%s)
-          echo "开始时间: $starttime."
-          echo "结束时间: $endtime."
-          echo "编译耗时: "$((end_seconds-start_seconds))"s."
-          echo "--------------------------------"
-          EOF
-          
-          # 给脚本添加执行权限
-          chmod +x clang-r399163.sh
-
       # -------------------- 设置环境变量 --------------------
       - name: 设置环境变量
         run: |
-          echo "CC=clang" >> $GITHUB_ENV
-          echo "CXX=clang++" >> $GITHUB_ENV
+          echo "CC=ccache clang" >> $GITHUB_ENV
+          echo "CXX=ccache clang++" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
@@ -261,23 +67,115 @@ jobs:
           echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
           echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
           echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=Marble" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=Guxin12" >> $GITHUB_ENV
 
-      # -------------------- 运行编译脚本 --------------------
-      - name: 运行编译脚本
+      # -------------------- 配置ccache --------------------
+      - name: 配置ccache
         run: |
-          ./clang-r399163.sh target=${{ github.event.inputs.target }}
+          ccache -M 10G  # 设置ccache缓存大小为10GB
+          ccache -s      # 显示ccache状态
 
-      # -------------------- 打包内核 --------------------
-      - name: 打包内核
+      # -------------------- 编译内核镜像 --------------------
+      - name: 编译内核镜像
         run: |
-          cd out/arch/arm64/boot
-          zip -r9 kernel-${{ github.event.inputs.tag_name }}.zip Image
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_HOST="Marble"
+          export KBUILD_BUILD_USER="Guxin12"
+          
+          echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
+          
+          # 禁用 32 位 VDSO 避免 -EL 错误
+          scripts/config --disable CONFIG_ARM64_VDSO32
+          make mrproper
+          make O=out b1c1_defconfig
+          
+          # 只编译内核镜像，不编译模块
+          make -j$(nproc) O=out \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image  # 只编译内核镜像
 
-      # -------------------- 上传 Release --------------------
-      - name: 上传 Release
-        uses: softprops/action-gh-release@v1
+          # 生成时间戳和 short sha，并导出为 env 供后续步骤使用
+          TIMESTAMP=$(date +"%Y%m%d-%H%M")
+          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
+
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
+
+          TAG_NAME="${{ github.event.inputs.tag_name }}"
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_ENV
+
+          RELEASE_NAME="${TAG_NAME}-${TIMESTAMP}-${SHORT_SHA}"
+          echo "RELEASE_NAME=${RELEASE_NAME}" >> $GITHUB_ENV
+
+          RELEASE_BODY="自动构建：${RELEASE_NAME}（由 GitHub Actions 创建）"
+          echo "RELEASE_BODY=${RELEASE_BODY}" >> $GITHUB_ENV
+
+          echo "IMAGE_PATH=$(pwd)/out/arch/arm64/boot/Image" >> $GITHUB_ENV
+          echo "IMAGE_NAME=kernel-${TIMESTAMP}.img" >> $GITHUB_ENV
+
+          ccache -s || true
+
+      # -------------------- 创建构建摘要 --------------------
+      - name: 创建构建摘要
+        run: |
+          BUILD_END=$(date +%s)
+          BUILD_START_VAL=${BUILD_START:-0}
+          BUILD_SEC=$((BUILD_END - BUILD_START_VAL))
+          BUILD_MIN=$((BUILD_SEC/60))
+          BUILD_SEC_REM=$((BUILD_SEC%60))
+          BUILD_TIME=$(printf "%d分%02d秒" ${BUILD_MIN} ${BUILD_SEC_REM})
+
+          echo "### 🚀🚀🚀 内核构建报告" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 详情 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **构建ID** | ${IMAGE_NAME:-unknown} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **配置文件** | b1c1_defconfig |" >> $GITHUB_STEP_SUMMARY
+          echo "| **构建耗时** | ${BUILD_TIME} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **编译主机** | ${{ runner.os }} (Ubuntu 22.04) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **工具链** | Clang + LLVM工具链 |" >> $GITHUB_STEP_SUMMARY
+          echo "| **缓存命中率** | $(ccache -s | grep 'cache hit rate' | awk '{print $4}' || true) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📦📦 构建产物（已上传到 Release）" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release 名称**: ${RELEASE_NAME:-unknown}" >> $GITHUB_STEP_SUMMARY
+          echo "- **内核镜像**: \`${IMAGE_PATH:-unknown}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 🔄🔄 ccache统计信息" >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY
+          ccache -s >> $GITHUB_STEP_SUMMARY || true
+          echo "```" >> $GITHUB_ENV
+
+      # -------------------- 上传构建产物列表 --------------------
+      - name: 上传构建产物列表
+        run: |
+          echo "准备上传以下构建产物:"
+          ls -lh ${IMAGE_PATH}
+
+      # -------------------- 发布到 GitHub Release --------------------
+      - name: 发布到 GitHub Release
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ github.event.inputs.tag_name }}
-          files: out/arch/arm64/boot/kernel-${{ github.event.inputs.tag_name }}.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 上传内核镜像
+          artifacts: |
+            ${{ env.IMAGE_PATH }}
+          # 使用构建过程中生成的标签和名称
+          tag: ${{ env.TAG_NAME }}
+          name: ${{ env.RELEASE_NAME }}
+          body: ${{ env.RELEASE_BODY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # 设置为正式发布
+          draft: false
+          prerelease: false
+          # 如果标签不存在则自动创建
+          allowUpdates: true
