@@ -28,11 +28,6 @@ usb_f_ecm_subset-y		:= f_subset.o
 obj-$(CONFIG_USB_F_SUBSET)	+= usb_f_ecm_subset.o
 usb_f_rndis-y			:= f_rndis.o rndis.o
 obj-$(CONFIG_USB_F_RNDIS)	+= usb_f_rndis.o
-
-# 添加编译标志以定义 KBUILD_MODNAME
-CFLAGS_f_rndis.o := -DKBUILD_MODNAME=\"rndis\"
-CFLAGS_rndis.o := -DKBUILD_MODNAME=\"rndis\"
-
 usb_f_mass_storage-y		:= f_mass_storage.o storage_common.o
 obj-$(CONFIG_USB_F_MASS_STORAGE)+= usb_f_mass_storage.o
 usb_f_fs-y			:= f_fs.o
