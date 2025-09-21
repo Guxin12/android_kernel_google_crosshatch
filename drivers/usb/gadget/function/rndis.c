@@ -21,10 +21,6 @@
  *		updates to merge with Linux 2.6, better match RNDIS spec
  */
 
-#ifndef KBUILD_MODNAME
-#define KBUILD_MODNAME "rndis"
-#endif
-
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>

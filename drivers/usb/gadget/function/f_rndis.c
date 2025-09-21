@@ -15,10 +15,6 @@
 
 /* #define VERBOSE_DEBUG */
 
-#ifndef KBUILD_MODNAME
-#define KBUILD_MODNAME "rndis"
-#endif
-
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
